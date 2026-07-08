@@ -52,21 +52,37 @@ defmodule OpenBoardWeb.BoardLive.Show do
   end
 
   @impl true
+  def handle_event("move_object", %{"id" => id, "x" => x, "y" => y}, socket) do
+    object = Boards.get_board_object!(id)
+
+    if object.board_id == socket.assigns.board.id do
+      {:ok, _object} =
+        Boards.update_board_object(object, %{
+          x: x,
+          y: y
+        })
+
+      {:noreply, reload_board_objects(socket)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
     <div class="min-h-screen bg-slate-950 text-slate-100">
       <header class="flex h-16 items-center justify-between border-b border-slate-800 bg-slate-900 px-6">
         <div>
           <div class="text-lg font-semibold tracking-tight">OpenBoard</div>
-          
           <div class="text-xs text-slate-400">Interactive board prototype</div>
         </div>
-        
+
         <div class="flex items-center gap-3">
           <div class="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300">
             Demo board
           </div>
-          
+
           <button
             type="button"
             phx-click="create_sticky"
@@ -76,69 +92,77 @@ defmodule OpenBoardWeb.BoardLive.Show do
           </button>
         </div>
       </header>
-      
+
       <main class="flex h-[calc(100vh-4rem)]">
         <aside class="w-72 border-r border-slate-800 bg-slate-900/80 p-5">
           <div class="mb-6">
             <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Board</div>
-            
             <div class="mt-2 text-xl font-semibold">{@board.title}</div>
-            
             <div class="mt-1 text-sm text-slate-400">/boards/demo</div>
           </div>
-          
+
           <div class="space-y-3">
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="text-sm font-semibold">Objects</div>
-              
               <div class="mt-1 text-2xl font-bold">{Enum.count(@board_objects)}</div>
             </div>
-            
+
+            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
+              <div class="text-sm font-semibold">Current features</div>
+              <ul class="mt-3 space-y-2 text-sm text-slate-400">
+                <li>• Create sticky notes</li>
+                <li>• Edit text</li>
+                <li>• Drag and drop</li>
+                <li>• Save position</li>
+              </ul>
+            </div>
+
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="text-sm font-semibold">Next steps</div>
-              
               <ul class="mt-3 space-y-2 text-sm text-slate-400">
-                <li>• Drag and drop</li>
-                
                 <li>• Live cursors</li>
-                
                 <li>• Multi-user sync</li>
-                
                 <li>• Board tools</li>
+                <li>• Presence</li>
               </ul>
             </div>
           </div>
         </aside>
-        
+
         <section class="relative flex-1 overflow-hidden bg-slate-950">
           <div class="absolute inset-0 opacity-40 board-grid"></div>
-          
+
           <div class="absolute left-6 top-6 z-10 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl">
             <div class="text-sm font-semibold">Canvas</div>
-            
             <div class="text-xs text-slate-400">
-              Первая визуальная версия OpenBoard. Следующий этап — drag-and-drop.
+              Зажми верхнюю панель стикера и перетащи его по доске.
             </div>
           </div>
-          
-          <div id="board-canvas" class="relative h-full w-full">
+
+          <div id="board-canvas" class="relative h-full w-full overflow-hidden">
             <%= for object <- @board_objects do %>
               <div
                 id={"board-object-#{object.id}"}
+                phx-hook="DraggableBoardObject"
+                data-object-id={object.id}
                 class={[
                   "absolute rounded-xl border p-3 shadow-xl",
-                  "transition hover:scale-[1.01]",
+                  "select-none transition hover:scale-[1.01]",
                   sticky_color_class(object.color)
                 ]}
                 style={
                   "left: #{object.x}px; top: #{object.y}px; width: #{object.width}px; height: #{object.height}px; z-index: #{object.z_index};"
                 }
               >
-                <div class="mb-2 flex items-center justify-between gap-2">
+                <div
+                  data-drag-handle
+                  class="mb-2 flex cursor-grab items-center justify-between gap-2 active:cursor-grabbing"
+                  title="Drag sticky note"
+                >
                   <div class="text-xs font-bold uppercase tracking-wide opacity-70">
                     Sticky note
                   </div>
-                  
+
                   <button
                     type="button"
                     phx-click="delete_object"
@@ -148,7 +172,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     ×
                   </button>
                 </div>
-                 <textarea
+
+                <textarea
                   phx-blur="update_text"
                   phx-value-id={object.id}
                   class="h-[calc(100%-2rem)] w-full resize-none border-none bg-transparent text-sm leading-relaxed text-slate-950 outline-none placeholder:text-slate-500"
@@ -180,7 +205,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
         {:ok, _second} =
           Boards.create_sticky_note(board, %{
-            text: "Следующий этап:\nсделать drag-and-drop через JS hook.",
+            text: "Следующий этап:\nсделать live-курсоры и синхронизацию.",
             x: 680.0,
             y: 260.0,
             color: "blue",
