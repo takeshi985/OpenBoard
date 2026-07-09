@@ -336,13 +336,14 @@ Hooks.BoardSurface = {
     this.workspaceHeight = Number(this.el.dataset.workspaceHeight || 4000)
 
     this.camera = {
-      x: -240,
-      y: -160,
+      x: 0,
+      y: 0,
       zoom: 1
     }
 
     this.remoteCursors = new Map()
     this.remoteStrokes = new Map()
+    this.selectedObjectId = null
 
     this.lastCursorSentAt = 0
     this.lastDrawSentAt = 0
@@ -357,6 +358,7 @@ Hooks.BoardSurface = {
     this.currentLocalPath = null
     this.currentShapeKind = null
     this.currentShapeStartPoint = null
+    this.currentShapeEndPoint = null
     this.currentShapePreview = null
 
     this.startPointerX = 0
@@ -367,6 +369,7 @@ Hooks.BoardSurface = {
     window.OpenBoardSurface = this
 
     this.updateDatasetState()
+    this.centerInitialCamera()
     this.applyCamera()
 
     this.onContextMenu = (event) => {
@@ -375,6 +378,25 @@ Hooks.BoardSurface = {
 
     this.onWheel = (event) => {
       this.zoomAtPointer(event)
+    }
+
+    this.onKeyDown = (event) => {
+      const tagName = event.target.tagName.toLowerCase()
+
+      if (tagName === "input" || tagName === "textarea" || event.target.isContentEditable) {
+        return
+      }
+
+      if ((event.key === "Delete" || event.key === "Backspace") && this.selectedObjectId) {
+        event.preventDefault()
+
+        this.pushEvent("delete_object", {
+          id: this.selectedObjectId
+        })
+
+        this.selectedObjectId = null
+        this.clearSelectionOutline()
+      }
     }
 
     this.onPointerMove = (event) => {
@@ -404,6 +426,9 @@ Hooks.BoardSurface = {
       if (event.target.closest("[data-board-object]")) {
         return
       }
+
+      this.selectedObjectId = null
+      this.clearSelectionOutline()
 
       if (this.selectedTool === "draw") {
         this.startDrawing(event)
@@ -504,6 +529,7 @@ Hooks.BoardSurface = {
     this.el.addEventListener("wheel", this.onWheel, { passive: false })
     this.el.addEventListener("pointermove", this.onPointerMove)
     this.el.addEventListener("pointerdown", this.onPointerDown)
+    document.addEventListener("keydown", this.onKeyDown)
   },
 
   updated() {
@@ -511,6 +537,7 @@ Hooks.BoardSurface = {
     this.ensureClientLayers()
     this.applyCamera()
     this.reconnectRemoteCursorElements()
+    this.reapplySelectionOutline()
   },
 
   destroyed() {
@@ -534,6 +561,10 @@ Hooks.BoardSurface = {
       this.el.removeEventListener("pointerdown", this.onPointerDown)
     }
 
+    if (this.onKeyDown) {
+      document.removeEventListener("keydown", this.onKeyDown)
+    }
+
     if (this.onDocumentPointerMove) {
       document.removeEventListener("pointermove", this.onDocumentPointerMove)
     }
@@ -555,6 +586,14 @@ Hooks.BoardSurface = {
       this.el.style.cursor = "crosshair"
     } else {
       this.el.style.cursor = "default"
+    }
+  },
+
+  centerInitialCamera() {
+    this.camera = {
+      x: (this.el.clientWidth - this.workspaceWidth) / 2,
+      y: (this.el.clientHeight - this.workspaceHeight) / 2,
+      zoom: 1
     }
   },
 
@@ -583,10 +622,10 @@ Hooks.BoardSurface = {
     const scaledWidth = this.workspaceWidth * camera.zoom
     const scaledHeight = this.workspaceHeight * camera.zoom
 
-    let minX = Math.min(viewportWidth - scaledWidth, 0)
-    let minY = Math.min(viewportHeight - scaledHeight, 0)
-    let maxX = 0
-    let maxY = 0
+    const minX = Math.min(viewportWidth - scaledWidth, 0)
+    const minY = Math.min(viewportHeight - scaledHeight, 0)
+    const maxX = 0
+    const maxY = 0
 
     return {
       x: clampBetween(camera.x, minX, maxX),
@@ -677,6 +716,33 @@ Hooks.BoardSurface = {
     document.removeEventListener("pointerup", this.onDocumentPointerUp)
   },
 
+  selectObject(objectId, element) {
+    this.selectedObjectId = objectId
+    this.clearSelectionOutline()
+
+    if (element) {
+      element.classList.add("ring-2", "ring-blue-500")
+    }
+  },
+
+  clearSelectionOutline() {
+    document.querySelectorAll("[data-board-object]").forEach((element) => {
+      element.classList.remove("ring-2", "ring-blue-500")
+    })
+  },
+
+  reapplySelectionOutline() {
+    if (!this.selectedObjectId) {
+      return
+    }
+
+    const element = document.getElementById(`board-object-${this.selectedObjectId}`)
+
+    if (element) {
+      element.classList.add("ring-2", "ring-blue-500")
+    }
+  },
+
   reconnectRemoteCursorElements() {
     for (const [userId, element] of this.remoteCursors.entries()) {
       if (!element.isConnected) {
@@ -720,6 +786,7 @@ Hooks.BoardSurface = {
     this.isShapeDrawing = true
     this.currentShapeKind = this.selectedTool
     this.currentShapeStartPoint = point
+    this.currentShapeEndPoint = point
     this.currentShapePreview = createPreviewShape(
       this.shapePreviewLayer,
       this.currentShapeKind,
@@ -739,6 +806,8 @@ Hooks.BoardSurface = {
       return
     }
 
+    this.currentShapeEndPoint = point
+
     updatePreviewShape(
       this.currentShapePreview,
       this.currentShapeKind,
@@ -751,41 +820,19 @@ Hooks.BoardSurface = {
     const preview = this.currentShapePreview
     const kind = this.currentShapeKind
     const startPoint = this.currentShapeStartPoint
+    const endPoint = this.currentShapeEndPoint || startPoint
 
     this.isShapeDrawing = false
     this.currentShapeKind = null
     this.currentShapeStartPoint = null
+    this.currentShapeEndPoint = null
     this.currentShapePreview = null
 
     document.removeEventListener("pointermove", this.onDocumentPointerMove)
     document.removeEventListener("pointerup", this.onDocumentPointerUp)
 
-    if (!preview || !kind || !startPoint) {
+    if (!preview || !kind || !startPoint || !endPoint) {
       return
-    }
-
-    const main = preview.querySelector("[data-preview-main]")
-    let endPoint = startPoint
-
-    if (kind === "line" || kind === "arrow") {
-      endPoint = {
-        x: Number(main.getAttribute("x2") || startPoint.x),
-        y: Number(main.getAttribute("y2") || startPoint.y)
-      }
-    } else {
-      const bbox = main.getBBox()
-      endPoint = {
-        x: bbox.x + bbox.width,
-        y: bbox.y + bbox.height
-      }
-
-      if (startPoint.x > endPoint.x) {
-        endPoint.x = bbox.x
-      }
-
-      if (startPoint.y > endPoint.y) {
-        endPoint.y = bbox.y
-      }
     }
 
     preview.remove()
@@ -1015,6 +1062,7 @@ Hooks.BoardObjectWindow = {
     this.startY = 0
     this.startWidth = 0
     this.startHeight = 0
+    this.hasMoved = false
 
     this.onPointerMoveHover = (event) => {
       const surface = window.OpenBoardSurface
@@ -1059,6 +1107,7 @@ Hooks.BoardObjectWindow = {
       this.startWidth = parseFloat(this.el.style.width || "0")
       this.startHeight = parseFloat(this.el.style.height || "0")
       this.resizeMode = getResizeMode(this.el, event)
+      this.hasMoved = false
 
       if (this.resizeMode) {
         this.mode = "resize"
@@ -1068,9 +1117,9 @@ Hooks.BoardObjectWindow = {
 
       event.preventDefault()
 
+      surface.selectObject(this.el.dataset.objectId, this.el)
+
       this.el.style.transition = "none"
-      this.el.style.zIndex = "9999"
-      this.el.classList.add("ring-2", "ring-blue-500")
 
       this.pushEvent("bring_to_front", {
         id: this.el.dataset.objectId
@@ -1090,6 +1139,10 @@ Hooks.BoardObjectWindow = {
       const deltaScreenX = event.clientX - this.startPointerX
       const deltaScreenY = event.clientY - this.startPointerY
       const delta = surface.screenDeltaToBoardDelta(deltaScreenX, deltaScreenY)
+
+      if (Math.abs(delta.x) > 1 || Math.abs(delta.y) > 1) {
+        this.hasMoved = true
+      }
 
       if (this.mode === "drag") {
         const nextX = clamp(this.startX + delta.x, 0)
@@ -1171,13 +1224,16 @@ Hooks.BoardObjectWindow = {
       document.removeEventListener("pointermove", this.onDocumentPointerMove)
       document.removeEventListener("pointerup", this.onDocumentPointerUp)
 
-      this.el.classList.remove("ring-2", "ring-blue-500")
       this.el.style.transition = ""
 
       const x = parseFloat(this.el.style.left || "0")
       const y = parseFloat(this.el.style.top || "0")
       const width = parseFloat(this.el.style.width || "0")
       const height = parseFloat(this.el.style.height || "0")
+
+      if (!this.hasMoved) {
+        return
+      }
 
       if (mode === "resize") {
         this.pushEvent("resize_object", {
