@@ -14,6 +14,8 @@ const CURSOR_SEND_INTERVAL = 33
 const DRAW_SEND_INTERVAL = 16
 const ERASER_SEND_INTERVAL = 24
 const ERASER_RADIUS = 18
+const MIN_DRAW_POINT_DISTANCE = 0.5
+const STAIR_SMOOTHING_SCREEN_EPSILON = 1.8
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 2.5
 
@@ -83,45 +85,177 @@ function distanceBetween(pointA, pointB) {
   return Math.sqrt(dx * dx + dy * dy)
 }
 
-function createSvgPath(svg, strokeId, x, y, color, width) {
+function formatNumber(value) {
+  return Number(value).toFixed(2)
+}
+
+function createSvgPath(svg, strokeId, x, y, color, width, smoothingEpsilon = 2) {
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path")
 
   path.dataset.strokeId = strokeId
-  path.dataset.points = `${x},${y}`
-  path.setAttribute("d", `M ${x} ${y}`)
+  path.dataset.points = `${formatNumber(x)},${formatNumber(y)}`
+  path.dataset.smoothingEpsilon = `${smoothingEpsilon}`
+  path.setAttribute("d", `M ${formatNumber(x)} ${formatNumber(y)}`)
   path.setAttribute("fill", "none")
   path.setAttribute("stroke", color)
   path.setAttribute("stroke-width", width)
   path.setAttribute("stroke-linecap", "round")
   path.setAttribute("stroke-linejoin", "round")
+  path.setAttribute("vector-effect", "non-scaling-stroke")
+
+  path._rawPoints = [{ x, y }]
+  path._renderQueued = false
 
   svg.appendChild(path)
 
   return path
 }
 
-function appendSvgPoint(path, x, y) {
-  if (!path) {
+function parseSvgPoints(path) {
+  const points = path.dataset.points || ""
+
+  return points
+    .split(" ")
+    .filter((point) => point.trim() !== "")
+    .map((point) => {
+      const [x, y] = point.split(",").map((value) => Number(value))
+
+      return { x, y }
+    })
+    .filter((point) => !Number.isNaN(point.x) && !Number.isNaN(point.y))
+}
+
+function getPathRawPoints(path) {
+  if (!path._rawPoints) {
+    path._rawPoints = parseSvgPoints(path)
+  }
+
+  return path._rawPoints
+}
+
+function serializeSvgPoints(points) {
+  return points.map((point) => `${formatNumber(point.x)},${formatNumber(point.y)}`).join(" ")
+}
+
+function perpendicularDistance(point, lineStart, lineEnd) {
+  const dx = lineEnd.x - lineStart.x
+  const dy = lineEnd.y - lineStart.y
+
+  if (dx === 0 && dy === 0) {
+    return distanceBetween(point, lineStart)
+  }
+
+  const numerator = Math.abs(dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x)
+  const denominator = Math.sqrt(dx * dx + dy * dy)
+
+  return numerator / denominator
+}
+
+function simplifyDouglasPeucker(points, epsilon) {
+  if (points.length <= 2) {
+    return points
+  }
+
+  let maxDistance = 0
+  let maxIndex = 0
+
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const distance = perpendicularDistance(points[index], points[0], points[points.length - 1])
+
+    if (distance > maxDistance) {
+      maxDistance = distance
+      maxIndex = index
+    }
+  }
+
+  if (maxDistance > epsilon) {
+    const left = simplifyDouglasPeucker(points.slice(0, maxIndex + 1), epsilon)
+    const right = simplifyDouglasPeucker(points.slice(maxIndex), epsilon)
+
+    return left.slice(0, -1).concat(right)
+  }
+
+  return [points[0], points[points.length - 1]]
+}
+
+function buildCatmullRomPath(points) {
+  if (points.length === 0) {
+    return ""
+  }
+
+  if (points.length === 1) {
+    return `M ${formatNumber(points[0].x)} ${formatNumber(points[0].y)}`
+  }
+
+  if (points.length === 2) {
+    return `M ${formatNumber(points[0].x)} ${formatNumber(points[0].y)} L ${formatNumber(points[1].x)} ${formatNumber(points[1].y)}`
+  }
+
+  const commands = [`M ${formatNumber(points[0].x)} ${formatNumber(points[0].y)}`]
+
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const point0 = points[index - 1] || points[index]
+    const point1 = points[index]
+    const point2 = points[index + 1]
+    const point3 = points[index + 2] || point2
+
+    const controlPoint1 = {
+      x: point1.x + (point2.x - point0.x) / 6,
+      y: point1.y + (point2.y - point0.y) / 6
+    }
+
+    const controlPoint2 = {
+      x: point2.x - (point3.x - point1.x) / 6,
+      y: point2.y - (point3.y - point1.y) / 6
+    }
+
+    commands.push(
+      `C ${formatNumber(controlPoint1.x)} ${formatNumber(controlPoint1.y)} ${formatNumber(controlPoint2.x)} ${formatNumber(controlPoint2.y)} ${formatNumber(point2.x)} ${formatNumber(point2.y)}`
+    )
+  }
+
+  return commands.join(" ")
+}
+
+function renderSmoothedPath(path) {
+  const rawPoints = getPathRawPoints(path)
+  const epsilon = Number(path.dataset.smoothingEpsilon || 2)
+
+  const simplifiedPoints = simplifyDouglasPeucker(rawPoints, epsilon)
+  path.dataset.points = serializeSvgPoints(rawPoints)
+  path.setAttribute("d", buildCatmullRomPath(simplifiedPoints))
+}
+
+function schedulePathRender(path) {
+  if (path._renderQueued) {
     return
   }
 
-  const points = path.dataset.points || ""
-  path.dataset.points = `${points} ${x},${y}`.trim()
+  path._renderQueued = true
 
-  const commands = path.dataset.points
-    .split(" ")
-    .map((point, index) => {
-      const [pointX, pointY] = point.split(",")
+  requestAnimationFrame(() => {
+    path._renderQueued = false
+    renderSmoothedPath(path)
+  })
+}
 
-      if (index === 0) {
-        return `M ${pointX} ${pointY}`
-      }
+function appendSvgPoint(path, x, y) {
+  if (!path) {
+    return false
+  }
 
-      return `L ${pointX} ${pointY}`
-    })
-    .join(" ")
+  const points = getPathRawPoints(path)
+  const nextPoint = { x, y }
+  const lastPoint = points[points.length - 1]
 
-  path.setAttribute("d", commands)
+  if (lastPoint && distanceBetween(lastPoint, nextPoint) < MIN_DRAW_POINT_DISTANCE) {
+    return false
+  }
+
+  points.push(nextPoint)
+  schedulePathRender(path)
+
+  return true
 }
 
 function isPointNearPath(point, path, radius) {
@@ -216,6 +350,7 @@ function createPreviewShape(layer, kind, color) {
     line.setAttribute("stroke", color)
     line.setAttribute("stroke-width", "3")
     line.setAttribute("stroke-linecap", "round")
+    line.setAttribute("vector-effect", "non-scaling-stroke")
 
     if (kind === "arrow") {
       line.setAttribute("marker-end", "url(#shape-preview-arrowhead)")
@@ -228,6 +363,7 @@ function createPreviewShape(layer, kind, color) {
     ellipse.setAttribute("fill", "rgba(255, 255, 255, 0.25)")
     ellipse.setAttribute("stroke", color)
     ellipse.setAttribute("stroke-width", "3")
+    ellipse.setAttribute("vector-effect", "non-scaling-stroke")
     element.appendChild(ellipse)
   } else if (kind === "triangle") {
     const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon")
@@ -236,6 +372,7 @@ function createPreviewShape(layer, kind, color) {
     polygon.setAttribute("stroke", color)
     polygon.setAttribute("stroke-width", "3")
     polygon.setAttribute("stroke-linejoin", "round")
+    polygon.setAttribute("vector-effect", "non-scaling-stroke")
     element.appendChild(polygon)
   } else {
     const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect")
@@ -243,6 +380,7 @@ function createPreviewShape(layer, kind, color) {
     rect.setAttribute("fill", "rgba(255, 255, 255, 0.25)")
     rect.setAttribute("stroke", color)
     rect.setAttribute("stroke-width", "3")
+    rect.setAttribute("vector-effect", "non-scaling-stroke")
 
     if (kind === "rounded_rectangle") {
       rect.setAttribute("rx", "18")
@@ -327,6 +465,7 @@ function buildShapePayload(kind, startPoint, currentPoint) {
 Hooks.BoardSurface = {
   mounted() {
     this.guest = getOrCreateGuestSession()
+    this.viewportGrid = document.getElementById("viewport-grid")
     this.world = document.getElementById("board-world")
     this.cursorLayer = document.getElementById("remote-cursor-layer")
     this.drawingLayer = document.getElementById("drawing-layer")
@@ -502,7 +641,8 @@ Hooks.BoardSurface = {
         drawing.x,
         drawing.y,
         drawing.color,
-        drawing.width
+        drawing.width,
+        drawing.smoothing_epsilon || this.strokeSmoothingEpsilon()
       )
 
       this.remoteStrokes.set(drawing.stroke_id, path)
@@ -598,6 +738,7 @@ Hooks.BoardSurface = {
   },
 
   ensureClientLayers() {
+    this.viewportGrid = document.getElementById("viewport-grid")
     this.world = document.getElementById("board-world")
     this.cursorLayer = document.getElementById("remote-cursor-layer")
     this.drawingLayer = document.getElementById("drawing-layer")
@@ -614,6 +755,51 @@ Hooks.BoardSurface = {
     this.camera = this.clampedCamera(this.camera)
     this.world.style.transform = `translate3d(${this.camera.x}px, ${this.camera.y}px, 0) scale(${this.camera.zoom})`
     this.world.style.transformOrigin = "0 0"
+
+    this.updateVectorLayerViewBoxes()
+    this.updateViewportGrid()
+    this.repositionRemoteCursors()
+  },
+
+  updateVectorLayerViewBoxes() {
+    const left = -this.camera.x / this.camera.zoom
+    const top = -this.camera.y / this.camera.zoom
+    const width = this.el.clientWidth / this.camera.zoom
+    const height = this.el.clientHeight / this.camera.zoom
+    const viewBox = `${left} ${top} ${width} ${height}`
+
+    for (const layer of [this.drawingLayer, this.shapePreviewLayer]) {
+      if (!layer) {
+        continue
+      }
+
+      layer.setAttribute("viewBox", viewBox)
+      layer.setAttribute("width", this.el.clientWidth)
+      layer.setAttribute("height", this.el.clientHeight)
+    }
+  },
+
+  updateViewportGrid() {
+    if (!this.viewportGrid) {
+      return
+    }
+
+    const minor = 20 * this.camera.zoom
+    const major = 80 * this.camera.zoom
+
+    this.viewportGrid.style.backgroundSize = `
+      ${major}px ${major}px,
+      ${major}px ${major}px,
+      ${minor}px ${minor}px,
+      ${minor}px ${minor}px
+    `
+
+    this.viewportGrid.style.backgroundPosition = `
+      ${this.camera.x % major}px ${this.camera.y % major}px,
+      ${this.camera.x % major}px ${this.camera.y % major}px,
+      ${this.camera.x % minor}px ${this.camera.y % minor}px,
+      ${this.camera.x % minor}px ${this.camera.y % minor}px
+    `
   },
 
   clampedCamera(camera) {
@@ -638,8 +824,15 @@ Hooks.BoardSurface = {
     const rect = this.el.getBoundingClientRect()
 
     return {
-      x: Math.round((event.clientX - rect.left - this.camera.x) / this.camera.zoom),
-      y: Math.round((event.clientY - rect.top - this.camera.y) / this.camera.zoom)
+      x: (event.clientX - rect.left - this.camera.x) / this.camera.zoom,
+      y: (event.clientY - rect.top - this.camera.y) / this.camera.zoom
+    }
+  },
+
+  boardToScreenPoint(point) {
+    return {
+      x: point.x * this.camera.zoom + this.camera.x,
+      y: point.y * this.camera.zoom + this.camera.y
     }
   },
 
@@ -657,6 +850,10 @@ Hooks.BoardSurface = {
       point.x <= this.workspaceWidth &&
       point.y <= this.workspaceHeight
     )
+  },
+
+  strokeSmoothingEpsilon() {
+    return STAIR_SMOOTHING_SCREEN_EPSILON / this.camera.zoom
   },
 
   zoomAtPointer(event) {
@@ -859,19 +1056,23 @@ Hooks.BoardSurface = {
 
     this.isDrawing = true
     this.currentStrokeId = `stroke-${this.guest.id}-${Date.now()}-${Math.floor(Math.random() * 100000)}`
+    const smoothingEpsilon = this.strokeSmoothingEpsilon()
+
     this.currentLocalPath = createSvgPath(
       this.drawingLayer,
       this.currentStrokeId,
       point.x,
       point.y,
       this.selectedColor,
-      4
+      4,
+      smoothingEpsilon
     )
 
     this.pushEvent("drawing_start", {
       stroke_id: this.currentStrokeId,
       x: point.x,
-      y: point.y
+      y: point.y,
+      smoothing_epsilon: smoothingEpsilon
     })
 
     document.addEventListener("pointermove", this.onDocumentPointerMove)
@@ -893,7 +1094,11 @@ Hooks.BoardSurface = {
       return
     }
 
-    appendSvgPoint(this.currentLocalPath, point.x, point.y)
+    const didAppend = appendSvgPoint(this.currentLocalPath, point.x, point.y)
+
+    if (!didAppend) {
+      return
+    }
 
     this.pushEvent("drawing_point", {
       stroke_id: this.currentStrokeId,
@@ -1030,7 +1235,23 @@ Hooks.BoardSurface = {
       this.remoteCursors.set(cursor.user_id, cursorElement)
     }
 
-    cursorElement.style.transform = `translate3d(${cursor.x}px, ${cursor.y}px, 0)`
+    cursorElement.dataset.boardX = cursor.x
+    cursorElement.dataset.boardY = cursor.y
+    this.positionRemoteCursor(cursorElement)
+  },
+
+  positionRemoteCursor(cursorElement) {
+    const boardX = Number(cursorElement.dataset.boardX || 0)
+    const boardY = Number(cursorElement.dataset.boardY || 0)
+    const screenPoint = this.boardToScreenPoint({ x: boardX, y: boardY })
+
+    cursorElement.style.transform = `translate3d(${screenPoint.x}px, ${screenPoint.y}px, 0)`
+  },
+
+  repositionRemoteCursors() {
+    for (const element of this.remoteCursors.values()) {
+      this.positionRemoteCursor(element)
+    }
   },
 
   cleanupRemoteCursors(activeUserIds) {
