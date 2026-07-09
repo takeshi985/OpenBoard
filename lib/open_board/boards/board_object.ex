@@ -5,7 +5,17 @@ defmodule OpenBoard.Boards.BoardObject do
 
   alias OpenBoard.Boards.Board
 
-  @allowed_kinds ["sticky", "text", "rectangle", "circle", "line", "arrow"]
+  @allowed_kinds [
+    "sticky",
+    "text",
+    "rectangle",
+    "rounded_rectangle",
+    "ellipse",
+    "circle",
+    "triangle",
+    "line",
+    "arrow"
+  ]
 
   schema "board_objects" do
     field :kind, :string
@@ -17,6 +27,11 @@ defmodule OpenBoard.Boards.BoardObject do
     field :color, :string, default: "yellow"
     field :z_index, :integer, default: 0
     field :is_pinned, :boolean, default: false
+
+    field :rotation, :float, default: 0.0
+    field :stroke_color, :string, default: "#0f172a"
+    field :fill_color, :string, default: "transparent"
+    field :stroke_width, :integer, default: 2
 
     belongs_to :board, Board
 
@@ -35,12 +50,17 @@ defmodule OpenBoard.Boards.BoardObject do
       :height,
       :color,
       :z_index,
-      :is_pinned
+      :is_pinned,
+      :rotation,
+      :stroke_color,
+      :fill_color,
+      :stroke_width
     ])
     |> validate_required([:board_id, :kind, :x, :y, :width, :height])
     |> validate_inclusion(:kind, @allowed_kinds)
     |> validate_number(:width, greater_than: 0)
     |> validate_number(:height, greater_than: 0)
+    |> validate_number(:stroke_width, greater_than: 0)
     |> assoc_constraint(:board)
   end
 end

@@ -118,7 +118,11 @@ defmodule OpenBoard.Boards do
       height: 150.0,
       color: "yellow",
       z_index: next_regular_z_index(board.id),
-      is_pinned: false
+      is_pinned: false,
+      rotation: 0.0,
+      stroke_color: "#0f172a",
+      fill_color: "transparent",
+      stroke_width: 2
     }
 
     defaults
