@@ -36,6 +36,7 @@ defmodule OpenBoardWeb.BoardLive.Index do
       <header class="flex h-16 items-center justify-between border-b border-slate-800 bg-slate-900 px-6">
         <div>
           <div class="text-lg font-semibold tracking-tight">OpenBoard</div>
+
           <div class="text-xs text-slate-400">Boards dashboard</div>
         </div>
 
@@ -52,6 +53,7 @@ defmodule OpenBoardWeb.BoardLive.Index do
           <div class="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
             <div>
               <h1 class="text-3xl font-bold tracking-tight">Your boards</h1>
+
               <p class="mt-2 max-w-2xl text-sm text-slate-400">
                 Create interactive boards for lessons, brainstorming, diagrams and shared work.
               </p>
@@ -64,7 +66,6 @@ defmodule OpenBoardWeb.BoardLive.Index do
                 placeholder="New board title"
                 class="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-orange-500 md:w-72"
               />
-
               <button
                 type="submit"
                 class="rounded-lg bg-orange-500 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-orange-400"
@@ -78,12 +79,14 @@ defmodule OpenBoardWeb.BoardLive.Index do
         <section>
           <div class="mb-4 flex items-center justify-between">
             <h2 class="text-lg font-semibold">All boards</h2>
+
             <div class="text-sm text-slate-500">{Enum.count(@boards)} total</div>
           </div>
 
           <%= if Enum.empty?(@boards) do %>
             <div class="rounded-2xl border border-dashed border-slate-700 bg-slate-900/60 p-10 text-center">
               <div class="text-lg font-semibold">No boards yet</div>
+
               <div class="mt-2 text-sm text-slate-400">
                 Create your first board using the form above.
               </div>

@@ -98,8 +98,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
       |> Map.merge(%{
         board_id: board.id,
         color: color,
-        x: 700.0 + count * 28,
-        y: 520.0 + count * 24,
+        x: @workspace_width / 2 + count * 28,
+        y: @workspace_height / 2 + count * 24,
         z_index: Boards.next_regular_z_index(board.id),
         is_pinned: false
       })
@@ -431,6 +431,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
       <header class="flex h-16 items-center justify-between border-b border-slate-200 bg-white/90 px-6 shadow-sm backdrop-blur">
         <div>
           <div class="text-lg font-bold tracking-tight text-slate-950">OpenBoard</div>
+
           <div class="text-xs text-slate-500">Collaborative whiteboard</div>
         </div>
 
@@ -452,7 +453,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
         <aside class="z-20 w-80 overflow-y-auto border-r border-slate-200 bg-white/95 p-5 shadow-sm">
           <div class="mb-6">
             <div class="text-xs font-bold uppercase tracking-wide text-slate-400">Board</div>
+
             <div class="mt-2 text-xl font-bold text-slate-950">{@board.title}</div>
+
             <div class="mt-1 text-sm text-slate-500">/boards/{@board.slug}</div>
           </div>
 
@@ -568,6 +571,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div class="flex items-center justify-between">
                 <div class="text-sm font-bold text-slate-800">Color</div>
+
                 <div class="text-xs font-medium text-slate-500">{@selected_color}</div>
               </div>
 
@@ -597,6 +601,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
                 <div>
                   <div class="text-sm font-bold text-slate-800">{@current_user.name}</div>
+
                   <div class="text-xs text-slate-500">{short_guest_id(@current_user.id)}</div>
                 </div>
               </div>
@@ -605,6 +610,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div class="flex items-center justify-between">
                 <div class="text-sm font-bold text-slate-800">Online users</div>
+
                 <div class="text-xs font-medium text-slate-500">{Enum.count(@online_users)}</div>
               </div>
 
@@ -629,6 +635,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
             <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div class="text-sm font-bold text-slate-800">Board objects</div>
+
               <div class="mt-1 text-3xl font-black text-slate-950">{Enum.count(@board_objects)}</div>
             </div>
           </div>
@@ -656,6 +663,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
               <div class="pointer-events-none absolute left-[700px] top-[360px] z-10 rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 text-slate-700 shadow-sm backdrop-blur">
                 <div class="text-sm font-bold">Canvas</div>
+
                 <div class="text-xs text-slate-500">
                   Workspace 6000×4000. ПКМ — pan, колесо — zoom к курсору.
                 </div>
@@ -668,7 +676,6 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 width={@workspace_width}
                 height={@workspace_height}
               ></svg>
-
               <svg
                 id="shape-preview-layer"
                 phx-update="ignore"
@@ -676,7 +683,6 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 width={@workspace_width}
                 height={@workspace_height}
               ></svg>
-
               <div
                 id="remote-cursor-layer"
                 phx-update="ignore"
@@ -732,7 +738,6 @@ defmodule OpenBoardWeb.BoardLive.Show do
                         </button>
                       </div>
                     </div>
-
                     <textarea
                       phx-blur="update_text"
                       phx-value-id={object.id}
@@ -919,8 +924,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
         {:ok, _first} =
           Boards.create_sticky_note(board, %{
             text: "OpenBoard MVP\n\n1. Большое поле\n2. Фигуры\n3. Zoom/Pan\n4. Realtime",
-            x: 700.0,
-            y: 520.0,
+            x: @workspace_width / 2 - 260,
+            y: @workspace_height / 2 - 120,
             color: "yellow",
             z_index: 1
           })
@@ -928,8 +933,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
         {:ok, _second} =
           Boards.create_sticky_note(board, %{
             text: "ПКМ — движение поля.\nWheel — zoom к курсору.\nФигуры — протяжкой ЛКМ.",
-            x: 1000.0,
-            y: 620.0,
+            x: @workspace_width / 2 + 40,
+            y: @workspace_height / 2 - 20,
             color: "blue",
             z_index: 2
           })
@@ -1055,6 +1060,10 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   defp shape_object?(%{kind: kind}) do
     kind in ["line", "arrow", "rectangle", "rounded_rectangle", "ellipse", "circle", "triangle"]
+  end
+
+  defp shape_style(%{kind: kind} = object) when kind in ["line", "arrow"] do
+    "left: #{object.x}px; top: #{object.y}px; width: #{object.width}px; height: #{object.height}px; z-index: #{object.z_index}; transform: rotate(#{object.rotation || 0}deg); transform-origin: 0px 50%;"
   end
 
   defp shape_style(object) do
