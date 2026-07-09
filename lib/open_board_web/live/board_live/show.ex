@@ -2,17 +2,36 @@ defmodule OpenBoardWeb.BoardLive.Show do
   use OpenBoardWeb, :live_view
 
   alias OpenBoard.Boards
+  alias OpenBoardWeb.Presence
 
   @impl true
   def mount(_params, _session, socket) do
     board = Boards.get_or_create_demo_board()
     board_objects = load_or_seed_demo_objects(board)
 
+    user = build_guest_user(socket)
+    topic = board_topic(board)
+
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(OpenBoard.PubSub, topic)
+
+      Presence.track(self(), topic, user.id, %{
+        id: user.id,
+        name: user.name,
+        color: user.color,
+        joined_at: DateTime.utc_now()
+      })
+    end
+
     socket =
       socket
       |> assign(:page_title, "OpenBoard Demo")
       |> assign(:board, board)
+      |> assign(:board_topic, topic)
+      |> assign(:current_user, user)
       |> assign(:board_objects, board_objects)
+      |> assign(:online_users, list_online_users(topic))
+      |> assign(:remote_cursors, %{})
 
     {:ok, socket}
   end
@@ -30,25 +49,37 @@ defmodule OpenBoardWeb.BoardLive.Show do
         z_index: count + 1
       })
 
+    broadcast_board_objects_changed(socket)
+
     {:noreply, reload_board_objects(socket)}
   end
 
   @impl true
   def handle_event("delete_object", %{"id" => id}, socket) do
-    id
-    |> Boards.get_board_object!()
-    |> Boards.delete_board_object()
+    object = Boards.get_board_object!(id)
 
-    {:noreply, reload_board_objects(socket)}
+    if object.board_id == socket.assigns.board.id do
+      Boards.delete_board_object(object)
+      broadcast_board_objects_changed(socket)
+
+      {:noreply, reload_board_objects(socket)}
+    else
+      {:noreply, socket}
+    end
   end
 
   @impl true
   def handle_event("update_text", %{"id" => id, "value" => text}, socket) do
-    id
-    |> Boards.get_board_object!()
-    |> Boards.update_board_object(%{text: text})
+    object = Boards.get_board_object!(id)
 
-    {:noreply, reload_board_objects(socket)}
+    if object.board_id == socket.assigns.board.id do
+      Boards.update_board_object(object, %{text: text})
+      broadcast_board_objects_changed(socket)
+
+      {:noreply, reload_board_objects(socket)}
+    else
+      {:noreply, socket}
+    end
   end
 
   @impl true
@@ -62,10 +93,75 @@ defmodule OpenBoardWeb.BoardLive.Show do
           y: y
         })
 
+      broadcast_board_objects_changed(socket)
+
       {:noreply, reload_board_objects(socket)}
     else
       {:noreply, socket}
     end
+  end
+
+  @impl true
+  def handle_event("cursor_move", %{"x" => x, "y" => y}, socket) do
+    user = socket.assigns.current_user
+
+    Phoenix.PubSub.broadcast(
+      OpenBoard.PubSub,
+      socket.assigns.board_topic,
+      {:cursor_moved,
+       %{
+         user_id: user.id,
+         name: user.name,
+         color: user.color,
+         x: x,
+         y: y
+       }}
+    )
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({:cursor_moved, cursor}, socket) do
+    current_user = socket.assigns.current_user
+
+    if cursor.user_id == current_user.id do
+      {:noreply, socket}
+    else
+      remote_cursors =
+        Map.put(socket.assigns.remote_cursors, cursor.user_id, %{
+          name: cursor.name,
+          color: cursor.color,
+          x: cursor.x,
+          y: cursor.y
+        })
+
+      {:noreply, assign(socket, :remote_cursors, remote_cursors)}
+    end
+  end
+
+  @impl true
+  def handle_info(:board_objects_changed, socket) do
+    {:noreply, reload_board_objects(socket)}
+  end
+
+  @impl true
+  def handle_info(%Phoenix.Socket.Broadcast{event: "presence_diff"}, socket) do
+    topic = socket.assigns.board_topic
+    online_users = list_online_users(topic)
+    online_user_ids = MapSet.new(Enum.map(online_users, & &1.id))
+
+    remote_cursors =
+      socket.assigns.remote_cursors
+      |> Enum.reject(fn {user_id, _cursor} -> not MapSet.member?(online_user_ids, user_id) end)
+      |> Map.new()
+
+    socket =
+      socket
+      |> assign(:online_users, online_users)
+      |> assign(:remote_cursors, remote_cursors)
+
+    {:noreply, socket}
   end
 
   @impl true
@@ -80,7 +176,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
         <div class="flex items-center gap-3">
           <div class="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300">
-            Demo board
+            {Enum.count(@online_users)} online
           </div>
 
           <button
@@ -103,6 +199,48 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
           <div class="space-y-3">
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
+              <div class="text-sm font-semibold">You</div>
+
+              <div class="mt-3 flex items-center gap-3">
+                <div
+                  class="h-3 w-3 rounded-full"
+                  style={"background-color: #{@current_user.color};"}
+                >
+                </div>
+
+                <div>
+                  <div class="text-sm font-semibold">{@current_user.name}</div>
+                  <div class="text-xs text-slate-500">{short_guest_id(@current_user.id)}</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
+              <div class="flex items-center justify-between">
+                <div class="text-sm font-semibold">Online users</div>
+                <div class="text-xs text-slate-500">{Enum.count(@online_users)}</div>
+              </div>
+
+              <div class="mt-3 space-y-3">
+                <%= for user <- @online_users do %>
+                  <div class="flex items-center gap-3">
+                    <div class="h-3 w-3 rounded-full" style={"background-color: #{user.color};"}>
+                    </div>
+
+                    <div class="min-w-0">
+                      <div class="truncate text-sm font-medium">
+                        {user.name}
+                        <%= if user.id == @current_user.id do %>
+                          <span class="text-xs text-slate-500">(you)</span>
+                        <% end %>
+                      </div>
+                    </div>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+
+            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="text-sm font-semibold">Objects</div>
               <div class="mt-1 text-2xl font-bold">{Enum.count(@board_objects)}</div>
             </div>
@@ -114,16 +252,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 <li>• Edit text</li>
                 <li>• Drag and drop</li>
                 <li>• Save position</li>
-              </ul>
-            </div>
-
-            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
-              <div class="text-sm font-semibold">Next steps</div>
-              <ul class="mt-3 space-y-2 text-sm text-slate-400">
+                <li>• Online presence</li>
                 <li>• Live cursors</li>
-                <li>• Multi-user sync</li>
-                <li>• Board tools</li>
-                <li>• Presence</li>
+                <li>• Multi-tab sync</li>
               </ul>
             </div>
           </div>
@@ -135,11 +266,35 @@ defmodule OpenBoardWeb.BoardLive.Show do
           <div class="absolute left-6 top-6 z-10 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl">
             <div class="text-sm font-semibold">Canvas</div>
             <div class="text-xs text-slate-400">
-              Зажми верхнюю панель стикера и перетащи его по доске.
+              Обновление страницы больше не создает нового участника в той же вкладке.
             </div>
           </div>
 
-          <div id="board-canvas" class="relative h-full w-full overflow-hidden">
+          <div
+            id="board-canvas"
+            phx-hook="BoardCursor"
+            class="relative h-full w-full overflow-hidden"
+          >
+            <%= for {_user_id, cursor} <- @remote_cursors do %>
+              <div
+                class="pointer-events-none absolute z-[1000]"
+                style={"left: #{cursor.x}px; top: #{cursor.y}px;"}
+              >
+                <div
+                  class="h-0 w-0 border-l-[8px] border-r-[8px] border-t-[14px] border-l-transparent border-r-transparent"
+                  style={"border-top-color: #{cursor.color}; transform: rotate(-35deg);"}
+                >
+                </div>
+
+                <div
+                  class="mt-1 rounded-md px-2 py-1 text-xs font-semibold text-white shadow"
+                  style={"background-color: #{cursor.color};"}
+                >
+                  {cursor.name}
+                </div>
+              </div>
+            <% end %>
+
             <%= for object <- @board_objects do %>
               <div
                 id={"board-object-#{object.id}"}
@@ -205,7 +360,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
         {:ok, _second} =
           Boards.create_sticky_note(board, %{
-            text: "Следующий этап:\nсделать live-курсоры и синхронизацию.",
+            text: "Теперь есть:\n- online presence\n- live cursors\n- multi-tab sync",
             x: 680.0,
             y: 260.0,
             color: "blue",
@@ -218,6 +373,73 @@ defmodule OpenBoardWeb.BoardLive.Show do
         objects
     end
   end
+
+  defp broadcast_board_objects_changed(socket) do
+    Phoenix.PubSub.broadcast(
+      OpenBoard.PubSub,
+      socket.assigns.board_topic,
+      :board_objects_changed
+    )
+  end
+
+  defp list_online_users(topic) do
+    topic
+    |> Presence.list()
+    |> Enum.map(fn {_user_id, %{metas: metas}} ->
+      meta =
+        metas
+        |> Enum.sort_by(& &1.joined_at, {:desc, DateTime})
+        |> List.first()
+
+      %{
+        id: meta.id,
+        name: meta.name,
+        color: meta.color
+      }
+    end)
+    |> Enum.sort_by(& &1.name)
+  end
+
+  defp build_guest_user(socket) do
+    if connected?(socket) do
+      params = get_connect_params(socket)
+
+      %{
+        id: clean_connect_param(params["guest_id"], fallback_guest_id()),
+        name: clean_connect_param(params["guest_name"], "Guest"),
+        color: clean_color(params["guest_color"])
+      }
+    else
+      %{
+        id: "guest-connecting",
+        name: "Connecting...",
+        color: "#64748b"
+      }
+    end
+  end
+
+  defp clean_connect_param(value, fallback) when is_binary(value) do
+    value
+    |> String.trim()
+    |> case do
+      "" -> fallback
+      clean_value -> String.slice(clean_value, 0, 80)
+    end
+  end
+
+  defp clean_connect_param(_value, fallback), do: fallback
+
+  defp clean_color("#" <> hex = color) when byte_size(hex) == 6, do: color
+  defp clean_color(_value), do: "#f97316"
+
+  defp fallback_guest_id do
+    "guest-#{System.unique_integer([:positive])}"
+  end
+
+  defp short_guest_id("guest-" <> rest), do: "guest-" <> String.slice(rest, 0, 8)
+  defp short_guest_id(id), do: id
+
+  defp board_topic(board), do: "board:#{board.id}"
 
   defp sticky_color_class("blue"), do: "border-sky-300 bg-sky-200 text-slate-950"
   defp sticky_color_class("green"), do: "border-emerald-300 bg-emerald-200 text-slate-950"
