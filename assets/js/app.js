@@ -8,6 +8,11 @@ import topbar from "../vendor/topbar"
 
 const Hooks = {}
 
+const EDGE_SIZE = 10
+const MIN_WIDTH = 110
+const MIN_HEIGHT = 80
+const CIRCLE_MIN_SIZE = 90
+
 function getOrCreateGuestSession() {
   const idKey = "open_board_guest_id"
   const nameKey = "open_board_guest_name"
@@ -50,6 +55,52 @@ function getOrCreateGuestSession() {
   return { id, name, color }
 }
 
+function clamp(value, min) {
+  return Math.max(min, Math.round(value))
+}
+
+function getResizeMode(element, event) {
+  const rect = element.getBoundingClientRect()
+
+  const offsetX = event.clientX - rect.left
+  const offsetY = event.clientY - rect.top
+
+  const nearLeft = offsetX <= EDGE_SIZE
+  const nearRight = offsetX >= rect.width - EDGE_SIZE
+  const nearTop = offsetY <= EDGE_SIZE
+  const nearBottom = offsetY >= rect.height - EDGE_SIZE
+
+  if (nearLeft && nearTop) return "nw"
+  if (nearRight && nearTop) return "ne"
+  if (nearLeft && nearBottom) return "sw"
+  if (nearRight && nearBottom) return "se"
+  if (nearLeft) return "w"
+  if (nearRight) return "e"
+  if (nearTop) return "n"
+  if (nearBottom) return "s"
+
+  return null
+}
+
+function cursorForResizeMode(mode) {
+  switch (mode) {
+    case "n":
+    case "s":
+      return "ns-resize"
+    case "e":
+    case "w":
+      return "ew-resize"
+    case "ne":
+    case "sw":
+      return "nesw-resize"
+    case "nw":
+    case "se":
+      return "nwse-resize"
+    default:
+      return "move"
+  }
+}
+
 Hooks.BoardCursor = {
   mounted() {
     this.lastSentAt = 0
@@ -87,84 +138,196 @@ Hooks.BoardCursor = {
   }
 }
 
-Hooks.DraggableBoardObject = {
+Hooks.BoardObjectWindow = {
   mounted() {
-    this.handle = this.el.querySelector("[data-drag-handle]")
-    this.resizeHandle = this.el.querySelector("[data-resize-handle]")
     this.canvas = document.getElementById("board-canvas")
 
     if (!this.canvas) {
       return
     }
 
-    this.isDragging = false
-    this.isResizing = false
+    this.mode = null
+    this.resizeMode = null
 
     this.startPointerX = 0
     this.startPointerY = 0
-    this.startObjectX = 0
-    this.startObjectY = 0
+    this.startX = 0
+    this.startY = 0
     this.startWidth = 0
     this.startHeight = 0
 
+    this.onPointerMoveHover = (event) => {
+      if (this.mode) {
+        return
+      }
+
+      if (event.target.closest("button") || event.target.closest("textarea")) {
+        this.el.style.cursor = "auto"
+        return
+      }
+
+      const resizeMode = getResizeMode(this.el, event)
+      this.el.style.cursor = cursorForResizeMode(resizeMode)
+    }
+
     this.onPointerDown = (event) => {
-      if (event.button !== 0 || this.isResizing) {
+      if (event.button !== 0) {
         return
       }
 
-      if (event.target.closest("button") || event.target.closest("[data-resize-handle]")) {
+      if (event.target.closest("button")) {
         return
       }
-
-      event.preventDefault()
 
       const objectRect = this.el.getBoundingClientRect()
       const canvasRect = this.canvas.getBoundingClientRect()
 
-      this.isDragging = true
       this.startPointerX = event.clientX
       this.startPointerY = event.clientY
-      this.startObjectX = objectRect.left - canvasRect.left
-      this.startObjectY = objectRect.top - canvasRect.top
+      this.startX = objectRect.left - canvasRect.left
+      this.startY = objectRect.top - canvasRect.top
+      this.startWidth = objectRect.width
+      this.startHeight = objectRect.height
+
+      this.resizeMode = getResizeMode(this.el, event)
+
+      if (this.resizeMode) {
+        this.mode = "resize"
+      } else {
+        this.mode = "drag"
+      }
+
+      event.preventDefault()
 
       this.el.style.transition = "none"
-      this.el.style.zIndex = "999"
+      this.el.style.zIndex = "9999"
       this.el.classList.add("ring-2", "ring-orange-400")
 
-      document.addEventListener("pointermove", this.onPointerMove)
-      document.addEventListener("pointerup", this.onPointerUp)
+      this.pushEvent("bring_to_front", {
+        id: this.el.dataset.objectId
+      })
+
+      document.addEventListener("pointermove", this.onDocumentPointerMove)
+      document.addEventListener("pointerup", this.onDocumentPointerUp)
     }
 
-    this.onPointerMove = (event) => {
-      if (!this.isDragging) {
+    this.onDocumentPointerMove = (event) => {
+      if (!this.mode) {
         return
       }
 
       const deltaX = event.clientX - this.startPointerX
       const deltaY = event.clientY - this.startPointerY
 
-      const nextX = Math.max(0, Math.round(this.startObjectX + deltaX))
-      const nextY = Math.max(0, Math.round(this.startObjectY + deltaY))
+      if (this.mode === "drag") {
+        const nextX = clamp(this.startX + deltaX, 0)
+        const nextY = clamp(this.startY + deltaY, 0)
 
-      this.el.style.left = `${nextX}px`
-      this.el.style.top = `${nextY}px`
-    }
+        this.el.style.left = `${nextX}px`
+        this.el.style.top = `${nextY}px`
 
-    this.onPointerUp = () => {
-      if (!this.isDragging) {
         return
       }
 
-      this.isDragging = false
+      if (this.mode === "resize") {
+        let nextX = this.startX
+        let nextY = this.startY
+        let nextWidth = this.startWidth
+        let nextHeight = this.startHeight
 
-      document.removeEventListener("pointermove", this.onPointerMove)
-      document.removeEventListener("pointerup", this.onPointerUp)
+        if (this.resizeMode.includes("e")) {
+          nextWidth = this.startWidth + deltaX
+        }
+
+        if (this.resizeMode.includes("s")) {
+          nextHeight = this.startHeight + deltaY
+        }
+
+        if (this.resizeMode.includes("w")) {
+          nextX = this.startX + deltaX
+          nextWidth = this.startWidth - deltaX
+        }
+
+        if (this.resizeMode.includes("n")) {
+          nextY = this.startY + deltaY
+          nextHeight = this.startHeight - deltaY
+        }
+
+        if (nextWidth < MIN_WIDTH) {
+          if (this.resizeMode.includes("w")) {
+            nextX = this.startX + this.startWidth - MIN_WIDTH
+          }
+
+          nextWidth = MIN_WIDTH
+        }
+
+        if (nextHeight < MIN_HEIGHT) {
+          if (this.resizeMode.includes("n")) {
+            nextY = this.startY + this.startHeight - MIN_HEIGHT
+          }
+
+          nextHeight = MIN_HEIGHT
+        }
+
+        if (this.el.dataset.objectKind === "circle") {
+          const size = Math.max(CIRCLE_MIN_SIZE, nextWidth, nextHeight)
+
+          if (this.resizeMode.includes("w")) {
+            nextX = this.startX + this.startWidth - size
+          }
+
+          if (this.resizeMode.includes("n")) {
+            nextY = this.startY + this.startHeight - size
+          }
+
+          nextWidth = size
+          nextHeight = size
+        }
+
+        nextX = clamp(nextX, 0)
+        nextY = clamp(nextY, 0)
+        nextWidth = clamp(nextWidth, MIN_WIDTH)
+        nextHeight = clamp(nextHeight, MIN_HEIGHT)
+
+        this.el.style.left = `${nextX}px`
+        this.el.style.top = `${nextY}px`
+        this.el.style.width = `${nextWidth}px`
+        this.el.style.height = `${nextHeight}px`
+      }
+    }
+
+    this.onDocumentPointerUp = () => {
+      if (!this.mode) {
+        return
+      }
+
+      const mode = this.mode
+
+      this.mode = null
+      this.resizeMode = null
+
+      document.removeEventListener("pointermove", this.onDocumentPointerMove)
+      document.removeEventListener("pointerup", this.onDocumentPointerUp)
 
       this.el.classList.remove("ring-2", "ring-orange-400")
       this.el.style.transition = ""
 
       const x = parseFloat(this.el.style.left || "0")
       const y = parseFloat(this.el.style.top || "0")
+      const width = parseFloat(this.el.style.width || "0")
+      const height = parseFloat(this.el.style.height || "0")
+
+      if (mode === "resize") {
+        this.pushEvent("resize_object", {
+          id: this.el.dataset.objectId,
+          x: x,
+          y: y,
+          width: width,
+          height: height
+        })
+
+        return
+      }
 
       this.pushEvent("move_object", {
         id: this.el.dataset.objectId,
@@ -173,106 +336,25 @@ Hooks.DraggableBoardObject = {
       })
     }
 
-    this.onResizePointerDown = (event) => {
-      if (event.button !== 0 || this.isDragging) {
-        return
-      }
-
-      event.preventDefault()
-      event.stopPropagation()
-
-      const objectRect = this.el.getBoundingClientRect()
-
-      this.isResizing = true
-      this.startPointerX = event.clientX
-      this.startPointerY = event.clientY
-      this.startWidth = objectRect.width
-      this.startHeight = objectRect.height
-
-      this.el.style.transition = "none"
-      this.el.style.zIndex = "999"
-      this.el.classList.add("ring-2", "ring-sky-400")
-
-      document.addEventListener("pointermove", this.onResizePointerMove)
-      document.addEventListener("pointerup", this.onResizePointerUp)
-    }
-
-    this.onResizePointerMove = (event) => {
-      if (!this.isResizing) {
-        return
-      }
-
-      const deltaX = event.clientX - this.startPointerX
-      const deltaY = event.clientY - this.startPointerY
-
-      let nextWidth = Math.max(110, Math.round(this.startWidth + deltaX))
-      let nextHeight = Math.max(80, Math.round(this.startHeight + deltaY))
-
-      if (this.el.dataset.objectKind === "circle") {
-        const size = Math.max(90, nextWidth, nextHeight)
-        nextWidth = size
-        nextHeight = size
-      }
-
-      this.el.style.width = `${nextWidth}px`
-      this.el.style.height = `${nextHeight}px`
-    }
-
-    this.onResizePointerUp = () => {
-      if (!this.isResizing) {
-        return
-      }
-
-      this.isResizing = false
-
-      document.removeEventListener("pointermove", this.onResizePointerMove)
-      document.removeEventListener("pointerup", this.onResizePointerUp)
-
-      this.el.classList.remove("ring-2", "ring-sky-400")
-      this.el.style.transition = ""
-
-      const width = parseFloat(this.el.style.width || "0")
-      const height = parseFloat(this.el.style.height || "0")
-
-      this.pushEvent("resize_object", {
-        id: this.el.dataset.objectId,
-        width: width,
-        height: height
-      })
-    }
-
-    if (this.handle) {
-      this.handle.addEventListener("pointerdown", this.onPointerDown)
-    }
-
-    if (this.resizeHandle) {
-      this.resizeHandle.addEventListener("pointerdown", this.onResizePointerDown)
-    }
+    this.el.addEventListener("pointermove", this.onPointerMoveHover)
+    this.el.addEventListener("pointerdown", this.onPointerDown)
   },
 
   destroyed() {
-    if (this.handle && this.onPointerDown) {
-      this.handle.removeEventListener("pointerdown", this.onPointerDown)
+    if (this.onPointerMoveHover) {
+      this.el.removeEventListener("pointermove", this.onPointerMoveHover)
     }
 
-    if (this.resizeHandle && this.onResizePointerDown) {
-      this.resizeHandle.removeEventListener("pointerdown", this.onResizePointerDown)
+    if (this.onPointerDown) {
+      this.el.removeEventListener("pointerdown", this.onPointerDown)
     }
 
-    if (this.onPointerMove) {
-      document.removeEventListener("pointermove", this.onPointerMove)
+    if (this.onDocumentPointerMove) {
+      document.removeEventListener("pointermove", this.onDocumentPointerMove)
     }
 
-    if (this.onPointerUp) {
-      document.removeEventListener("pointerup", this.onPointerUp)
-    }
-
-    if (this.onResizePointerMove) {
-      document.removeEventListener("pointermove", this.onResizePointerMove)
-    }
-
-    if (this.onResizePointerUp) {
-      document.removeEventListener("pointerup", this.onResizePointerUp)
+    if (this.onDocumentPointerUp) {
+      document.removeEventListener("pointerup", this.onDocumentPointerUp)
     }
   }
 }

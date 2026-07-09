@@ -11,6 +11,10 @@ defmodule OpenBoard.Boards do
   alias OpenBoard.Boards.Board
   alias OpenBoard.Boards.BoardObject
 
+  @regular_z_min 1
+  @regular_z_max 9_999
+  @pinned_z_min 10_000
+
   def list_boards do
     Board
     |> order_by([board], desc: board.inserted_at)
@@ -89,6 +93,15 @@ defmodule OpenBoard.Boards do
   def get_board_object!(id), do: Repo.get!(BoardObject, id)
 
   def create_board_object(attrs \\ %{}) do
+    board_id = Map.get(attrs, :board_id) || Map.get(attrs, "board_id")
+
+    attrs =
+      if Map.has_key?(attrs, :z_index) or Map.has_key?(attrs, "z_index") or is_nil(board_id) do
+        attrs
+      else
+        Map.put(attrs, :z_index, next_regular_z_index(board_id))
+      end
+
     %BoardObject{}
     |> BoardObject.changeset(attrs)
     |> Repo.insert()
@@ -104,7 +117,8 @@ defmodule OpenBoard.Boards do
       width: 240.0,
       height: 150.0,
       color: "yellow",
-      z_index: 1
+      z_index: next_regular_z_index(board.id),
+      is_pinned: false
     }
 
     defaults
@@ -122,6 +136,52 @@ defmodule OpenBoard.Boards do
 
   def change_board_object(%BoardObject{} = board_object, attrs \\ %{}) do
     BoardObject.changeset(board_object, attrs)
+  end
+
+  def bring_board_object_to_front(%BoardObject{} = board_object) do
+    if board_object.is_pinned do
+      update_board_object(board_object, %{z_index: next_pinned_z_index(board_object.board_id)})
+    else
+      update_board_object(board_object, %{z_index: next_regular_z_index(board_object.board_id)})
+    end
+  end
+
+  def toggle_pin_board_object(%BoardObject{} = board_object) do
+    if board_object.is_pinned do
+      update_board_object(board_object, %{
+        is_pinned: false,
+        z_index: next_regular_z_index(board_object.board_id)
+      })
+    else
+      update_board_object(board_object, %{
+        is_pinned: true,
+        z_index: next_pinned_z_index(board_object.board_id)
+      })
+    end
+  end
+
+  def next_regular_z_index(board_id) do
+    max_z =
+      BoardObject
+      |> where([object], object.board_id == ^board_id)
+      |> where([object], object.is_pinned == false)
+      |> where([object], object.z_index < @regular_z_max)
+      |> select([object], max(object.z_index))
+      |> Repo.one()
+
+    max((max_z || @regular_z_min) + 1, @regular_z_min)
+  end
+
+  def next_pinned_z_index(board_id) do
+    max_z =
+      BoardObject
+      |> where([object], object.board_id == ^board_id)
+      |> where([object], object.is_pinned == true)
+      |> where([object], object.z_index >= @pinned_z_min)
+      |> select([object], max(object.z_index))
+      |> Repo.one()
+
+    max((max_z || @pinned_z_min) + 1, @pinned_z_min)
   end
 
   defp generate_unique_slug do
