@@ -1,7 +1,5 @@
-// Include phoenix_html to handle method=PUT/DELETE in forms and buttons.
 import "phoenix_html"
 
-// Establish Phoenix Socket and LiveView configuration.
 import { Socket } from "phoenix"
 import { LiveSocket } from "phoenix_live_view"
 import topbar from "../vendor/topbar"
@@ -16,6 +14,17 @@ const CURSOR_SEND_INTERVAL = 33
 const DRAW_SEND_INTERVAL = 16
 const ERASER_SEND_INTERVAL = 24
 const ERASER_RADIUS = 18
+const MIN_ZOOM = 0.25
+const MAX_ZOOM = 2.5
+
+const SHAPE_TOOLS = new Set([
+  "line",
+  "arrow",
+  "rectangle",
+  "rounded_rectangle",
+  "ellipse",
+  "triangle"
+])
 
 function getOrCreateGuestSession() {
   const idKey = "open_board_guest_id"
@@ -63,12 +72,74 @@ function clamp(value, min) {
   return Math.max(min, Math.round(value))
 }
 
-function getCanvasPoint(element, event) {
-  const rect = element.getBoundingClientRect()
+function clampBetween(value, min, max) {
+  return Math.min(max, Math.max(min, value))
+}
 
-  return {
-    x: Math.round(event.clientX - rect.left),
-    y: Math.round(event.clientY - rect.top)
+function distanceBetween(pointA, pointB) {
+  const dx = pointA.x - pointB.x
+  const dy = pointA.y - pointB.y
+
+  return Math.sqrt(dx * dx + dy * dy)
+}
+
+function createSvgPath(svg, strokeId, x, y, color, width) {
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path")
+
+  path.dataset.strokeId = strokeId
+  path.dataset.points = `${x},${y}`
+  path.setAttribute("d", `M ${x} ${y}`)
+  path.setAttribute("fill", "none")
+  path.setAttribute("stroke", color)
+  path.setAttribute("stroke-width", width)
+  path.setAttribute("stroke-linecap", "round")
+  path.setAttribute("stroke-linejoin", "round")
+
+  svg.appendChild(path)
+
+  return path
+}
+
+function appendSvgPoint(path, x, y) {
+  if (!path) {
+    return
+  }
+
+  const points = path.dataset.points || ""
+  path.dataset.points = `${points} ${x},${y}`.trim()
+
+  const commands = path.dataset.points
+    .split(" ")
+    .map((point, index) => {
+      const [pointX, pointY] = point.split(",")
+
+      if (index === 0) {
+        return `M ${pointX} ${pointY}`
+      }
+
+      return `L ${pointX} ${pointY}`
+    })
+    .join(" ")
+
+  path.setAttribute("d", commands)
+}
+
+function isPointNearPath(point, path, radius) {
+  try {
+    const length = path.getTotalLength()
+    const samples = Math.max(12, Math.ceil(length / 10))
+
+    for (let index = 0; index <= samples; index += 1) {
+      const pathPoint = path.getPointAtLength((length * index) / samples)
+
+      if (distanceBetween(point, { x: pathPoint.x, y: pathPoint.y }) <= radius) {
+        return true
+      }
+    }
+
+    return false
+  } catch (_error) {
+    return false
   }
 }
 
@@ -114,78 +185,161 @@ function cursorForResizeMode(mode) {
   }
 }
 
-function createSvgPath(svg, strokeId, x, y, color, width) {
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path")
+function createPreviewShape(layer, kind, color) {
+  const element = document.createElementNS("http://www.w3.org/2000/svg", "g")
+  element.dataset.previewShape = "true"
 
-  path.dataset.strokeId = strokeId
-  path.dataset.points = `${x},${y}`
-  path.setAttribute("d", `M ${x} ${y}`)
-  path.setAttribute("fill", "none")
-  path.setAttribute("stroke", color)
-  path.setAttribute("stroke-width", width)
-  path.setAttribute("stroke-linecap", "round")
-  path.setAttribute("stroke-linejoin", "round")
+  if (kind === "line" || kind === "arrow") {
+    if (kind === "arrow") {
+      const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs")
+      const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker")
+      const markerPath = document.createElementNS("http://www.w3.org/2000/svg", "path")
 
-  svg.appendChild(path)
+      marker.setAttribute("id", "shape-preview-arrowhead")
+      marker.setAttribute("markerWidth", "10")
+      marker.setAttribute("markerHeight", "10")
+      marker.setAttribute("refX", "8")
+      marker.setAttribute("refY", "5")
+      marker.setAttribute("orient", "auto")
+      marker.setAttribute("markerUnits", "strokeWidth")
 
-  return path
+      markerPath.setAttribute("d", "M 0 0 L 10 5 L 0 10 z")
+      markerPath.setAttribute("fill", color)
+
+      marker.appendChild(markerPath)
+      defs.appendChild(marker)
+      element.appendChild(defs)
+    }
+
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line")
+    line.dataset.previewMain = "true"
+    line.setAttribute("stroke", color)
+    line.setAttribute("stroke-width", "3")
+    line.setAttribute("stroke-linecap", "round")
+
+    if (kind === "arrow") {
+      line.setAttribute("marker-end", "url(#shape-preview-arrowhead)")
+    }
+
+    element.appendChild(line)
+  } else if (kind === "ellipse") {
+    const ellipse = document.createElementNS("http://www.w3.org/2000/svg", "ellipse")
+    ellipse.dataset.previewMain = "true"
+    ellipse.setAttribute("fill", "rgba(255, 255, 255, 0.25)")
+    ellipse.setAttribute("stroke", color)
+    ellipse.setAttribute("stroke-width", "3")
+    element.appendChild(ellipse)
+  } else if (kind === "triangle") {
+    const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon")
+    polygon.dataset.previewMain = "true"
+    polygon.setAttribute("fill", "rgba(255, 255, 255, 0.25)")
+    polygon.setAttribute("stroke", color)
+    polygon.setAttribute("stroke-width", "3")
+    polygon.setAttribute("stroke-linejoin", "round")
+    element.appendChild(polygon)
+  } else {
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect")
+    rect.dataset.previewMain = "true"
+    rect.setAttribute("fill", "rgba(255, 255, 255, 0.25)")
+    rect.setAttribute("stroke", color)
+    rect.setAttribute("stroke-width", "3")
+
+    if (kind === "rounded_rectangle") {
+      rect.setAttribute("rx", "18")
+      rect.setAttribute("ry", "18")
+    }
+
+    element.appendChild(rect)
+  }
+
+  layer.appendChild(element)
+
+  return element
 }
 
-function appendSvgPoint(path, x, y) {
-  if (!path) {
+function updatePreviewShape(preview, kind, startPoint, currentPoint) {
+  const main = preview.querySelector("[data-preview-main]")
+
+  if (!main) {
     return
   }
 
-  const points = path.dataset.points || ""
-  path.dataset.points = `${points} ${x},${y}`.trim()
+  if (kind === "line" || kind === "arrow") {
+    main.setAttribute("x1", startPoint.x)
+    main.setAttribute("y1", startPoint.y)
+    main.setAttribute("x2", currentPoint.x)
+    main.setAttribute("y2", currentPoint.y)
+    return
+  }
 
-  const commands = path.dataset.points
-    .split(" ")
-    .map((point, index) => {
-      const [pointX, pointY] = point.split(",")
+  const x = Math.min(startPoint.x, currentPoint.x)
+  const y = Math.min(startPoint.y, currentPoint.y)
+  const width = Math.abs(currentPoint.x - startPoint.x)
+  const height = Math.abs(currentPoint.y - startPoint.y)
 
-      if (index === 0) {
-        return `M ${pointX} ${pointY}`
-      }
+  if (kind === "ellipse") {
+    main.setAttribute("cx", x + width / 2)
+    main.setAttribute("cy", y + height / 2)
+    main.setAttribute("rx", Math.max(width / 2, 1))
+    main.setAttribute("ry", Math.max(height / 2, 1))
+    return
+  }
 
-      return `L ${pointX} ${pointY}`
-    })
-    .join(" ")
+  if (kind === "triangle") {
+    const points = `${x + width / 2},${y} ${x + width},${y + height} ${x},${y + height}`
+    main.setAttribute("points", points)
+    return
+  }
 
-  path.setAttribute("d", commands)
+  main.setAttribute("x", x)
+  main.setAttribute("y", y)
+  main.setAttribute("width", width)
+  main.setAttribute("height", height)
 }
 
-function distanceBetween(pointA, pointB) {
-  const dx = pointA.x - pointB.x
-  const dy = pointA.y - pointB.y
+function buildShapePayload(kind, startPoint, currentPoint) {
+  if (kind === "line" || kind === "arrow") {
+    const dx = currentPoint.x - startPoint.x
+    const dy = currentPoint.y - startPoint.y
+    const length = Math.max(Math.sqrt(dx * dx + dy * dy), 1)
+    const rotation = (Math.atan2(dy, dx) * 180) / Math.PI
 
-  return Math.sqrt(dx * dx + dy * dy)
-}
-
-function isPointNearPath(point, path, radius) {
-  try {
-    const length = path.getTotalLength()
-    const samples = Math.max(12, Math.ceil(length / 10))
-
-    for (let index = 0; index <= samples; index += 1) {
-      const pathPoint = path.getPointAtLength((length * index) / samples)
-
-      if (distanceBetween(point, { x: pathPoint.x, y: pathPoint.y }) <= radius) {
-        return true
-      }
+    return {
+      kind: kind,
+      x: startPoint.x,
+      y: startPoint.y - 12,
+      width: length,
+      height: 24,
+      rotation: rotation
     }
+  }
 
-    return false
-  } catch (_error) {
-    return false
+  return {
+    kind: kind,
+    x: Math.min(startPoint.x, currentPoint.x),
+    y: Math.min(startPoint.y, currentPoint.y),
+    width: Math.max(Math.abs(currentPoint.x - startPoint.x), 8),
+    height: Math.max(Math.abs(currentPoint.y - startPoint.y), 8),
+    rotation: 0
   }
 }
 
 Hooks.BoardSurface = {
   mounted() {
     this.guest = getOrCreateGuestSession()
+    this.world = document.getElementById("board-world")
     this.cursorLayer = document.getElementById("remote-cursor-layer")
     this.drawingLayer = document.getElementById("drawing-layer")
+    this.shapePreviewLayer = document.getElementById("shape-preview-layer")
+
+    this.workspaceWidth = Number(this.el.dataset.workspaceWidth || 6000)
+    this.workspaceHeight = Number(this.el.dataset.workspaceHeight || 4000)
+
+    this.camera = {
+      x: -240,
+      y: -160,
+      zoom: 1
+    }
 
     this.remoteCursors = new Map()
     this.remoteStrokes = new Map()
@@ -196,10 +350,32 @@ Hooks.BoardSurface = {
 
     this.isDrawing = false
     this.isErasing = false
+    this.isPanning = false
+    this.isShapeDrawing = false
+
     this.currentStrokeId = null
     this.currentLocalPath = null
+    this.currentShapeKind = null
+    this.currentShapeStartPoint = null
+    this.currentShapePreview = null
+
+    this.startPointerX = 0
+    this.startPointerY = 0
+    this.startCameraX = 0
+    this.startCameraY = 0
+
+    window.OpenBoardSurface = this
 
     this.updateDatasetState()
+    this.applyCamera()
+
+    this.onContextMenu = (event) => {
+      event.preventDefault()
+    }
+
+    this.onWheel = (event) => {
+      this.zoomAtPointer(event)
+    }
 
     this.onPointerMove = (event) => {
       this.sendCursorMove(event)
@@ -216,6 +392,11 @@ Hooks.BoardSurface = {
     this.onPointerDown = (event) => {
       this.updateDatasetState()
 
+      if (event.button === 2) {
+        this.startPanning(event)
+        return
+      }
+
       if (event.button !== 0) {
         return
       }
@@ -231,6 +412,11 @@ Hooks.BoardSurface = {
 
       if (this.selectedTool === "eraser") {
         this.startErasing(event)
+        return
+      }
+
+      if (SHAPE_TOOLS.has(this.selectedTool)) {
+        this.startShapeDrawing(event)
       }
     }
 
@@ -242,6 +428,14 @@ Hooks.BoardSurface = {
       if (this.isErasing) {
         this.eraseAtPointer(event)
       }
+
+      if (this.isPanning) {
+        this.panAtPointer(event)
+      }
+
+      if (this.isShapeDrawing) {
+        this.updateShapeDrawing(event)
+      }
     }
 
     this.onDocumentPointerUp = () => {
@@ -251,6 +445,14 @@ Hooks.BoardSurface = {
 
       if (this.isErasing) {
         this.finishErasing()
+      }
+
+      if (this.isPanning) {
+        this.finishPanning()
+      }
+
+      if (this.isShapeDrawing) {
+        this.finishShapeDrawing()
       }
     }
 
@@ -298,6 +500,8 @@ Hooks.BoardSurface = {
       this.removeStroke(drawing.stroke_id)
     })
 
+    this.el.addEventListener("contextmenu", this.onContextMenu)
+    this.el.addEventListener("wheel", this.onWheel, { passive: false })
     this.el.addEventListener("pointermove", this.onPointerMove)
     this.el.addEventListener("pointerdown", this.onPointerDown)
   },
@@ -305,10 +509,23 @@ Hooks.BoardSurface = {
   updated() {
     this.updateDatasetState()
     this.ensureClientLayers()
+    this.applyCamera()
     this.reconnectRemoteCursorElements()
   },
 
   destroyed() {
+    if (window.OpenBoardSurface === this) {
+      window.OpenBoardSurface = null
+    }
+
+    if (this.onContextMenu) {
+      this.el.removeEventListener("contextmenu", this.onContextMenu)
+    }
+
+    if (this.onWheel) {
+      this.el.removeEventListener("wheel", this.onWheel)
+    }
+
     if (this.onPointerMove) {
       this.el.removeEventListener("pointermove", this.onPointerMove)
     }
@@ -334,14 +551,130 @@ Hooks.BoardSurface = {
       this.el.style.cursor = "crosshair"
     } else if (this.selectedTool === "eraser") {
       this.el.style.cursor = "cell"
+    } else if (SHAPE_TOOLS.has(this.selectedTool)) {
+      this.el.style.cursor = "crosshair"
     } else {
       this.el.style.cursor = "default"
     }
   },
 
   ensureClientLayers() {
+    this.world = document.getElementById("board-world")
     this.cursorLayer = document.getElementById("remote-cursor-layer")
     this.drawingLayer = document.getElementById("drawing-layer")
+    this.shapePreviewLayer = document.getElementById("shape-preview-layer")
+  },
+
+  applyCamera() {
+    this.ensureClientLayers()
+
+    if (!this.world) {
+      return
+    }
+
+    this.camera = this.clampedCamera(this.camera)
+    this.world.style.transform = `translate3d(${this.camera.x}px, ${this.camera.y}px, 0) scale(${this.camera.zoom})`
+    this.world.style.transformOrigin = "0 0"
+  },
+
+  clampedCamera(camera) {
+    const viewportWidth = this.el.clientWidth
+    const viewportHeight = this.el.clientHeight
+    const scaledWidth = this.workspaceWidth * camera.zoom
+    const scaledHeight = this.workspaceHeight * camera.zoom
+
+    let minX = Math.min(viewportWidth - scaledWidth, 0)
+    let minY = Math.min(viewportHeight - scaledHeight, 0)
+    let maxX = 0
+    let maxY = 0
+
+    return {
+      x: clampBetween(camera.x, minX, maxX),
+      y: clampBetween(camera.y, minY, maxY),
+      zoom: clampBetween(camera.zoom, MIN_ZOOM, MAX_ZOOM)
+    }
+  },
+
+  screenToBoardPoint(event) {
+    const rect = this.el.getBoundingClientRect()
+
+    return {
+      x: Math.round((event.clientX - rect.left - this.camera.x) / this.camera.zoom),
+      y: Math.round((event.clientY - rect.top - this.camera.y) / this.camera.zoom)
+    }
+  },
+
+  screenDeltaToBoardDelta(deltaX, deltaY) {
+    return {
+      x: deltaX / this.camera.zoom,
+      y: deltaY / this.camera.zoom
+    }
+  },
+
+  isPointInside(point) {
+    return (
+      point.x >= 0 &&
+      point.y >= 0 &&
+      point.x <= this.workspaceWidth &&
+      point.y <= this.workspaceHeight
+    )
+  },
+
+  zoomAtPointer(event) {
+    event.preventDefault()
+
+    const rect = this.el.getBoundingClientRect()
+    const mouseX = event.clientX - rect.left
+    const mouseY = event.clientY - rect.top
+
+    const boardX = (mouseX - this.camera.x) / this.camera.zoom
+    const boardY = (mouseY - this.camera.y) / this.camera.zoom
+
+    const zoomFactor = event.deltaY < 0 ? 1.08 : 0.92
+    const nextZoom = clampBetween(this.camera.zoom * zoomFactor, MIN_ZOOM, MAX_ZOOM)
+
+    this.camera = {
+      x: mouseX - boardX * nextZoom,
+      y: mouseY - boardY * nextZoom,
+      zoom: nextZoom
+    }
+
+    this.applyCamera()
+  },
+
+  startPanning(event) {
+    event.preventDefault()
+
+    this.isPanning = true
+    this.startPointerX = event.clientX
+    this.startPointerY = event.clientY
+    this.startCameraX = this.camera.x
+    this.startCameraY = this.camera.y
+    this.el.style.cursor = "grabbing"
+
+    document.addEventListener("pointermove", this.onDocumentPointerMove)
+    document.addEventListener("pointerup", this.onDocumentPointerUp)
+  },
+
+  panAtPointer(event) {
+    const deltaX = event.clientX - this.startPointerX
+    const deltaY = event.clientY - this.startPointerY
+
+    this.camera = {
+      ...this.camera,
+      x: this.startCameraX + deltaX,
+      y: this.startCameraY + deltaY
+    }
+
+    this.applyCamera()
+  },
+
+  finishPanning() {
+    this.isPanning = false
+    this.updateDatasetState()
+
+    document.removeEventListener("pointermove", this.onDocumentPointerMove)
+    document.removeEventListener("pointerup", this.onDocumentPointerUp)
   },
 
   reconnectRemoteCursorElements() {
@@ -350,15 +683,6 @@ Hooks.BoardSurface = {
         this.remoteCursors.delete(userId)
       }
     }
-  },
-
-  isPointInside(point) {
-    return (
-      point.x >= 0 &&
-      point.y >= 0 &&
-      point.x <= this.el.clientWidth &&
-      point.y <= this.el.clientHeight
-    )
   },
 
   sendCursorMove(event) {
@@ -370,7 +694,7 @@ Hooks.BoardSurface = {
 
     this.lastCursorSentAt = now
 
-    const point = getCanvasPoint(this.el, event)
+    const point = this.screenToBoardPoint(event)
 
     if (!this.isPointInside(point)) {
       return
@@ -382,10 +706,103 @@ Hooks.BoardSurface = {
     })
   },
 
+  startShapeDrawing(event) {
+    event.preventDefault()
+
+    const point = this.screenToBoardPoint(event)
+
+    if (!this.isPointInside(point)) {
+      return
+    }
+
+    this.ensureClientLayers()
+
+    this.isShapeDrawing = true
+    this.currentShapeKind = this.selectedTool
+    this.currentShapeStartPoint = point
+    this.currentShapePreview = createPreviewShape(
+      this.shapePreviewLayer,
+      this.currentShapeKind,
+      this.selectedColor
+    )
+
+    updatePreviewShape(this.currentShapePreview, this.currentShapeKind, point, point)
+
+    document.addEventListener("pointermove", this.onDocumentPointerMove)
+    document.addEventListener("pointerup", this.onDocumentPointerUp)
+  },
+
+  updateShapeDrawing(event) {
+    const point = this.screenToBoardPoint(event)
+
+    if (!this.isPointInside(point)) {
+      return
+    }
+
+    updatePreviewShape(
+      this.currentShapePreview,
+      this.currentShapeKind,
+      this.currentShapeStartPoint,
+      point
+    )
+  },
+
+  finishShapeDrawing() {
+    const preview = this.currentShapePreview
+    const kind = this.currentShapeKind
+    const startPoint = this.currentShapeStartPoint
+
+    this.isShapeDrawing = false
+    this.currentShapeKind = null
+    this.currentShapeStartPoint = null
+    this.currentShapePreview = null
+
+    document.removeEventListener("pointermove", this.onDocumentPointerMove)
+    document.removeEventListener("pointerup", this.onDocumentPointerUp)
+
+    if (!preview || !kind || !startPoint) {
+      return
+    }
+
+    const main = preview.querySelector("[data-preview-main]")
+    let endPoint = startPoint
+
+    if (kind === "line" || kind === "arrow") {
+      endPoint = {
+        x: Number(main.getAttribute("x2") || startPoint.x),
+        y: Number(main.getAttribute("y2") || startPoint.y)
+      }
+    } else {
+      const bbox = main.getBBox()
+      endPoint = {
+        x: bbox.x + bbox.width,
+        y: bbox.y + bbox.height
+      }
+
+      if (startPoint.x > endPoint.x) {
+        endPoint.x = bbox.x
+      }
+
+      if (startPoint.y > endPoint.y) {
+        endPoint.y = bbox.y
+      }
+    }
+
+    preview.remove()
+
+    const payload = buildShapePayload(kind, startPoint, endPoint)
+
+    if (payload.width < 8 && payload.height < 8) {
+      return
+    }
+
+    this.pushEvent("create_shape", payload)
+  },
+
   startDrawing(event) {
     event.preventDefault()
 
-    const point = getCanvasPoint(this.el, event)
+    const point = this.screenToBoardPoint(event)
 
     if (!this.isPointInside(point)) {
       return
@@ -423,7 +840,7 @@ Hooks.BoardSurface = {
 
     this.lastDrawSentAt = now
 
-    const point = getCanvasPoint(this.el, event)
+    const point = this.screenToBoardPoint(event)
 
     if (!this.isPointInside(point)) {
       return
@@ -471,7 +888,7 @@ Hooks.BoardSurface = {
 
     this.lastEraseSentAt = now
 
-    const point = getCanvasPoint(this.el, event)
+    const point = this.screenToBoardPoint(event)
 
     if (!this.isPointInside(point)) {
       return
@@ -600,7 +1017,9 @@ Hooks.BoardObjectWindow = {
     this.startHeight = 0
 
     this.onPointerMoveHover = (event) => {
-      if (this.mode) {
+      const surface = window.OpenBoardSurface
+
+      if (this.mode || !surface) {
         return
       }
 
@@ -619,7 +1038,9 @@ Hooks.BoardObjectWindow = {
     }
 
     this.onPointerDown = (event) => {
-      if ((this.canvas.dataset.selectedTool || "select") !== "select") {
+      const surface = window.OpenBoardSurface
+
+      if (!surface || (this.canvas.dataset.selectedTool || "select") !== "select") {
         return
       }
 
@@ -631,16 +1052,12 @@ Hooks.BoardObjectWindow = {
         return
       }
 
-      const objectRect = this.el.getBoundingClientRect()
-      const canvasRect = this.canvas.getBoundingClientRect()
-
       this.startPointerX = event.clientX
       this.startPointerY = event.clientY
-      this.startX = objectRect.left - canvasRect.left
-      this.startY = objectRect.top - canvasRect.top
-      this.startWidth = objectRect.width
-      this.startHeight = objectRect.height
-
+      this.startX = parseFloat(this.el.style.left || "0")
+      this.startY = parseFloat(this.el.style.top || "0")
+      this.startWidth = parseFloat(this.el.style.width || "0")
+      this.startHeight = parseFloat(this.el.style.height || "0")
       this.resizeMode = getResizeMode(this.el, event)
 
       if (this.resizeMode) {
@@ -653,7 +1070,7 @@ Hooks.BoardObjectWindow = {
 
       this.el.style.transition = "none"
       this.el.style.zIndex = "9999"
-      this.el.classList.add("ring-2", "ring-orange-400")
+      this.el.classList.add("ring-2", "ring-blue-500")
 
       this.pushEvent("bring_to_front", {
         id: this.el.dataset.objectId
@@ -664,16 +1081,19 @@ Hooks.BoardObjectWindow = {
     }
 
     this.onDocumentPointerMove = (event) => {
-      if (!this.mode) {
+      const surface = window.OpenBoardSurface
+
+      if (!this.mode || !surface) {
         return
       }
 
-      const deltaX = event.clientX - this.startPointerX
-      const deltaY = event.clientY - this.startPointerY
+      const deltaScreenX = event.clientX - this.startPointerX
+      const deltaScreenY = event.clientY - this.startPointerY
+      const delta = surface.screenDeltaToBoardDelta(deltaScreenX, deltaScreenY)
 
       if (this.mode === "drag") {
-        const nextX = clamp(this.startX + deltaX, 0)
-        const nextY = clamp(this.startY + deltaY, 0)
+        const nextX = clamp(this.startX + delta.x, 0)
+        const nextY = clamp(this.startY + delta.y, 0)
 
         this.el.style.left = `${nextX}px`
         this.el.style.top = `${nextY}px`
@@ -688,21 +1108,21 @@ Hooks.BoardObjectWindow = {
         let nextHeight = this.startHeight
 
         if (this.resizeMode.includes("e")) {
-          nextWidth = this.startWidth + deltaX
+          nextWidth = this.startWidth + delta.x
         }
 
         if (this.resizeMode.includes("s")) {
-          nextHeight = this.startHeight + deltaY
+          nextHeight = this.startHeight + delta.y
         }
 
         if (this.resizeMode.includes("w")) {
-          nextX = this.startX + deltaX
-          nextWidth = this.startWidth - deltaX
+          nextX = this.startX + delta.x
+          nextWidth = this.startWidth - delta.x
         }
 
         if (this.resizeMode.includes("n")) {
-          nextY = this.startY + deltaY
-          nextHeight = this.startHeight - deltaY
+          nextY = this.startY + delta.y
+          nextHeight = this.startHeight - delta.y
         }
 
         if (nextWidth < MIN_WIDTH) {
@@ -721,19 +1141,9 @@ Hooks.BoardObjectWindow = {
           nextHeight = MIN_HEIGHT
         }
 
-        if (this.el.dataset.objectKind === "circle") {
-          const size = Math.max(CIRCLE_MIN_SIZE, nextWidth, nextHeight)
-
-          if (this.resizeMode.includes("w")) {
-            nextX = this.startX + this.startWidth - size
-          }
-
-          if (this.resizeMode.includes("n")) {
-            nextY = this.startY + this.startHeight - size
-          }
-
-          nextWidth = size
-          nextHeight = size
+        if (this.el.dataset.objectKind === "ellipse" || this.el.dataset.objectKind === "circle") {
+          nextWidth = Math.max(nextWidth, CIRCLE_MIN_SIZE)
+          nextHeight = Math.max(nextHeight, CIRCLE_MIN_SIZE)
         }
 
         nextX = clamp(nextX, 0)
@@ -761,7 +1171,7 @@ Hooks.BoardObjectWindow = {
       document.removeEventListener("pointermove", this.onDocumentPointerMove)
       document.removeEventListener("pointerup", this.onDocumentPointerUp)
 
-      this.el.classList.remove("ring-2", "ring-orange-400")
+      this.el.classList.remove("ring-2", "ring-blue-500")
       this.el.style.transition = ""
 
       const x = parseFloat(this.el.style.left || "0")
@@ -828,19 +1238,16 @@ const liveSocket = new LiveSocket("/live", Socket, {
   }
 })
 
-// Show progress bar on live navigation and form submits.
 topbar.config({
   barColors: {
-    0: "#f97316"
+    0: "#2563eb"
   },
-  shadowColor: "rgba(0, 0, 0, .3)"
+  shadowColor: "rgba(0, 0, 0, .2)"
 })
 
 window.addEventListener("phx:page-loading-start", () => topbar.show(300))
 window.addEventListener("phx:page-loading-stop", () => topbar.hide())
 
-// Connect if there are any LiveViews on the page.
 liveSocket.connect()
 
-// Expose liveSocket on window for web console debug logs and latency simulation.
 window.liveSocket = liveSocket

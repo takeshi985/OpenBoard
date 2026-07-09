@@ -4,8 +4,26 @@ defmodule OpenBoardWeb.BoardLive.Show do
   alias OpenBoard.Boards
   alias OpenBoardWeb.Presence
 
+  @workspace_width 6000
+  @workspace_height 4000
+
   @colors ["yellow", "blue", "green", "pink", "purple", "white"]
-  @tools ["select", "draw", "eraser"]
+
+  @tools [
+    "select",
+    "sticky",
+    "text",
+    "line",
+    "arrow",
+    "rectangle",
+    "rounded_rectangle",
+    "ellipse",
+    "triangle",
+    "draw",
+    "eraser"
+  ]
+
+  @shape_tools ["line", "arrow", "rectangle", "rounded_rectangle", "ellipse", "triangle"]
 
   @impl true
   def mount(%{"slug" => slug}, _session, socket) do
@@ -45,6 +63,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
           |> assign(:selected_color, "yellow")
           |> assign(:selected_tool, "select")
           |> assign(:available_colors, @colors)
+          |> assign(:workspace_width, @workspace_width)
+          |> assign(:workspace_height, @workspace_height)
 
         {:ok, socket}
     end
@@ -78,8 +98,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
       |> Map.merge(%{
         board_id: board.id,
         color: color,
-        x: 180.0 + count * 28,
-        y: 150.0 + count * 24,
+        x: 700.0 + count * 28,
+        y: 520.0 + count * 24,
         z_index: Boards.next_regular_z_index(board.id),
         is_pinned: false
       })
@@ -93,6 +113,44 @@ defmodule OpenBoardWeb.BoardLive.Show do
         {:noreply, put_flash(socket, :error, "Could not create object")}
     end
   end
+
+  @impl true
+  def handle_event("create_shape", %{"kind" => kind} = params, socket)
+      when kind in @shape_tools do
+    board = socket.assigns.board
+
+    x = number_param(params, "x", 0.0)
+    y = number_param(params, "y", 0.0)
+    width = max(number_param(params, "width", 1.0), 1.0)
+    height = max(number_param(params, "height", 1.0), 1.0)
+    rotation = number_param(params, "rotation", 0.0)
+
+    attrs =
+      kind
+      |> shape_defaults(socket.assigns.selected_color)
+      |> Map.merge(%{
+        board_id: board.id,
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        rotation: rotation,
+        z_index: Boards.next_regular_z_index(board.id),
+        is_pinned: false
+      })
+
+    case Boards.create_board_object(attrs) do
+      {:ok, _object} ->
+        broadcast_board_objects_changed(socket)
+        {:noreply, reload_board_objects(socket)}
+
+      {:error, _changeset} ->
+        {:noreply, put_flash(socket, :error, "Could not create shape")}
+    end
+  end
+
+  @impl true
+  def handle_event("create_shape", _params, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("delete_object", %{"id" => id}, socket) do
@@ -229,23 +287,6 @@ defmodule OpenBoardWeb.BoardLive.Show do
   end
 
   @impl true
-  def handle_event("drawing_erase", %{"stroke_id" => stroke_id}, socket) do
-    user = socket.assigns.current_user
-
-    Phoenix.PubSub.broadcast(
-      OpenBoard.PubSub,
-      socket.assigns.board_topic,
-      {:drawing_erased,
-       %{
-         user_id: user.id,
-         stroke_id: stroke_id
-       }}
-    )
-
-    {:noreply, socket}
-  end
-
-  @impl true
   def handle_event("drawing_start", %{"stroke_id" => stroke_id, "x" => x, "y" => y}, socket) do
     user = socket.assigns.current_user
 
@@ -293,6 +334,23 @@ defmodule OpenBoardWeb.BoardLive.Show do
       OpenBoard.PubSub,
       socket.assigns.board_topic,
       {:drawing_finished,
+       %{
+         user_id: user.id,
+         stroke_id: stroke_id
+       }}
+    )
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("drawing_erase", %{"stroke_id" => stroke_id}, socket) do
+    user = socket.assigns.current_user
+
+    Phoenix.PubSub.broadcast(
+      OpenBoard.PubSub,
+      socket.assigns.board_topic,
+      {:drawing_erased,
        %{
          user_id: user.id,
          stroke_id: stroke_id
@@ -369,54 +427,45 @@ defmodule OpenBoardWeb.BoardLive.Show do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="min-h-screen bg-slate-950 text-slate-100">
-      <header class="flex h-16 items-center justify-between border-b border-slate-800 bg-slate-900 px-6">
+    <div class="min-h-screen bg-[#f4f1ea] text-slate-900">
+      <header class="flex h-16 items-center justify-between border-b border-slate-200 bg-white/90 px-6 shadow-sm backdrop-blur">
         <div>
-          <div class="text-lg font-semibold tracking-tight">OpenBoard</div>
-
-          <div class="text-xs text-slate-400">Interactive board prototype</div>
+          <div class="text-lg font-bold tracking-tight text-slate-950">OpenBoard</div>
+          <div class="text-xs text-slate-500">Collaborative whiteboard</div>
         </div>
 
         <div class="flex items-center gap-3">
           <.link
             navigate={~p"/boards"}
-            class="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800"
+            class="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50"
           >
             Boards
           </.link>
 
-          <div class="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300">
+          <div class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
             {Enum.count(@online_users)} online
           </div>
         </div>
       </header>
 
       <main class="flex h-[calc(100vh-4rem)]">
-        <aside class="w-72 overflow-y-auto border-r border-slate-800 bg-slate-900/80 p-5">
+        <aside class="z-20 w-80 overflow-y-auto border-r border-slate-200 bg-white/95 p-5 shadow-sm">
           <div class="mb-6">
-            <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Board</div>
-
-            <div class="mt-2 text-xl font-semibold">{@board.title}</div>
-
-            <div class="mt-1 text-sm text-slate-400">/boards/{@board.slug}</div>
+            <div class="text-xs font-bold uppercase tracking-wide text-slate-400">Board</div>
+            <div class="mt-2 text-xl font-bold text-slate-950">{@board.title}</div>
+            <div class="mt-1 text-sm text-slate-500">/boards/{@board.slug}</div>
           </div>
 
-          <div class="space-y-3">
-            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
-              <div class="text-sm font-semibold">Mode</div>
+          <div class="space-y-4">
+            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div class="text-sm font-bold text-slate-800">Mode</div>
 
               <div class="mt-3 grid grid-cols-3 gap-2">
                 <button
                   type="button"
                   phx-click="select_tool"
                   phx-value-tool="select"
-                  class={[
-                    "rounded-lg px-3 py-2 text-sm font-semibold",
-                    if(@selected_tool == "select",
-                      do: "bg-orange-500 text-white hover:bg-orange-400",
-                      else: "border border-slate-700 text-slate-200 hover:bg-slate-800"
-                    )
-                  ]}
+                  class={tool_button_class(@selected_tool == "select")}
                 >
                   Select
                 </button>
@@ -425,13 +474,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   type="button"
                   phx-click="select_tool"
                   phx-value-tool="draw"
-                  class={[
-                    "rounded-lg px-3 py-2 text-sm font-semibold",
-                    if(@selected_tool == "draw",
-                      do: "bg-orange-500 text-white hover:bg-orange-400",
-                      else: "border border-slate-700 text-slate-200 hover:bg-slate-800"
-                    )
-                  ]}
+                  class={tool_button_class(@selected_tool == "draw")}
                 >
                   Draw
                 </button>
@@ -440,28 +483,26 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   type="button"
                   phx-click="select_tool"
                   phx-value-tool="eraser"
-                  class={[
-                    "rounded-lg px-3 py-2 text-sm font-semibold",
-                    if(@selected_tool == "eraser",
-                      do: "bg-orange-500 text-white hover:bg-orange-400",
-                      else: "border border-slate-700 text-slate-200 hover:bg-slate-800"
-                    )
-                  ]}
+                  class={tool_button_class(@selected_tool == "eraser")}
                 >
                   Erase
                 </button>
               </div>
+
+              <div class="mt-3 rounded-xl border border-slate-200 bg-white p-3 text-xs leading-relaxed text-slate-500">
+                ПКМ + drag: двигать поле. Wheel: плавный zoom к курсору.
+              </div>
             </div>
 
-            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
-              <div class="text-sm font-semibold">Objects</div>
+            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div class="text-sm font-bold text-slate-800">Quick objects</div>
 
               <div class="mt-3 grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   phx-click="create_object"
                   phx-value-kind="sticky"
-                  class="rounded-lg border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800"
+                  class="rounded-xl bg-amber-400 px-3 py-2 text-sm font-bold text-amber-950 shadow-sm hover:bg-amber-300"
                 >
                   Sticky
                 </button>
@@ -470,36 +511,64 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   type="button"
                   phx-click="create_object"
                   phx-value-kind="text"
-                  class="rounded-lg border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800"
+                  class="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 shadow-sm hover:bg-slate-50"
                 >
                   Text
-                </button>
-
-                <button
-                  type="button"
-                  phx-click="create_object"
-                  phx-value-kind="rectangle"
-                  class="rounded-lg border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800"
-                >
-                  Rectangle
-                </button>
-
-                <button
-                  type="button"
-                  phx-click="create_object"
-                  phx-value-kind="circle"
-                  class="rounded-lg border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800"
-                >
-                  Circle
                 </button>
               </div>
             </div>
 
-            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
-              <div class="flex items-center justify-between">
-                <div class="text-sm font-semibold">Color</div>
+            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div class="text-sm font-bold text-slate-800">Shape tools</div>
 
-                <div class="text-xs text-slate-500">{@selected_color}</div>
+              <div class="mt-3 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  phx-click="select_tool"
+                  phx-value-tool="line"
+                  class={tool_button_class(@selected_tool == "line")}
+                >Line</button>
+                <button
+                  type="button"
+                  phx-click="select_tool"
+                  phx-value-tool="arrow"
+                  class={tool_button_class(@selected_tool == "arrow")}
+                >Arrow</button>
+                <button
+                  type="button"
+                  phx-click="select_tool"
+                  phx-value-tool="rectangle"
+                  class={tool_button_class(@selected_tool == "rectangle")}
+                >Rectangle</button>
+                <button
+                  type="button"
+                  phx-click="select_tool"
+                  phx-value-tool="rounded_rectangle"
+                  class={tool_button_class(@selected_tool == "rounded_rectangle")}
+                >Rounded</button>
+                <button
+                  type="button"
+                  phx-click="select_tool"
+                  phx-value-tool="ellipse"
+                  class={tool_button_class(@selected_tool == "ellipse")}
+                >Ellipse</button>
+                <button
+                  type="button"
+                  phx-click="select_tool"
+                  phx-value-tool="triangle"
+                  class={tool_button_class(@selected_tool == "triangle")}
+                >Triangle</button>
+              </div>
+
+              <div class="mt-3 rounded-xl border border-slate-200 bg-white p-3 text-xs leading-relaxed text-slate-500">
+                Выбери фигуру и протяни ЛКМ по полю.
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div class="flex items-center justify-between">
+                <div class="text-sm font-bold text-slate-800">Color</div>
+                <div class="text-xs font-medium text-slate-500">{@selected_color}</div>
               </div>
 
               <div class="mt-3 grid grid-cols-6 gap-2">
@@ -509,8 +578,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-click="select_color"
                     phx-value-color={color}
                     class={[
-                      "h-7 w-7 rounded-full border-2 transition hover:scale-110",
-                      if(color == @selected_color, do: "border-orange-400", else: "border-slate-700"),
+                      "h-8 w-8 rounded-full border-2 shadow-sm transition hover:scale-110",
+                      if(color == @selected_color, do: "border-slate-950", else: "border-slate-300"),
                       color_dot_class(color)
                     ]}
                     title={color}
@@ -519,26 +588,24 @@ defmodule OpenBoardWeb.BoardLive.Show do
               </div>
             </div>
 
-            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
-              <div class="text-sm font-semibold">You</div>
+            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div class="text-sm font-bold text-slate-800">You</div>
 
               <div class="mt-3 flex items-center gap-3">
                 <div class="h-3 w-3 rounded-full" style={"background-color: #{@current_user.color};"}>
                 </div>
 
                 <div>
-                  <div class="text-sm font-semibold">{@current_user.name}</div>
-
+                  <div class="text-sm font-bold text-slate-800">{@current_user.name}</div>
                   <div class="text-xs text-slate-500">{short_guest_id(@current_user.id)}</div>
                 </div>
               </div>
             </div>
 
-            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
+            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div class="flex items-center justify-between">
-                <div class="text-sm font-semibold">Online users</div>
-
-                <div class="text-xs text-slate-500">{Enum.count(@online_users)}</div>
+                <div class="text-sm font-bold text-slate-800">Online users</div>
+                <div class="text-xs font-medium text-slate-500">{Enum.count(@online_users)}</div>
               </div>
 
               <div class="mt-3 space-y-3">
@@ -548,10 +615,10 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     </div>
 
                     <div class="min-w-0">
-                      <div class="truncate text-sm font-medium">
+                      <div class="truncate text-sm font-semibold text-slate-700">
                         {user.name}
                         <%= if user.id == @current_user.id do %>
-                          <span class="text-xs text-slate-500">(you)</span>
+                          <span class="text-xs text-slate-400">(you)</span>
                         <% end %>
                       </div>
                     </div>
@@ -560,105 +627,224 @@ defmodule OpenBoardWeb.BoardLive.Show do
               </div>
             </div>
 
-            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
-              <div class="text-sm font-semibold">Board objects</div>
-
-              <div class="mt-1 text-2xl font-bold">{Enum.count(@board_objects)}</div>
+            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div class="text-sm font-bold text-slate-800">Board objects</div>
+              <div class="mt-1 text-3xl font-black text-slate-950">{Enum.count(@board_objects)}</div>
             </div>
           </div>
         </aside>
 
-        <section class="relative flex-1 overflow-hidden bg-slate-950">
-          <div class="absolute inset-0 opacity-40 board-grid"></div>
-
-          <div class="absolute left-6 top-6 z-10 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl">
-            <div class="text-sm font-semibold">Canvas</div>
-
-            <div class="text-xs text-slate-400">
-              Select: move/resize objects. Draw: realtime ink stroke.
-            </div>
-          </div>
-
+        <section
+          id="board-viewport"
+          class="whiteboard-viewport relative flex-1 overflow-hidden bg-[#ebe7dc]"
+        >
           <div
             id="board-canvas"
             phx-hook="BoardSurface"
             data-selected-tool={@selected_tool}
             data-selected-color={drawing_color_hex(@selected_color)}
-            class="relative h-full w-full overflow-hidden"
+            data-workspace-width={@workspace_width}
+            data-workspace-height={@workspace_height}
+            class="absolute inset-0 overflow-hidden"
           >
-            <svg
-              id="drawing-layer"
-              phx-update="ignore"
-              class="pointer-events-none absolute inset-0 z-0 h-full w-full"
-            ></svg>
             <div
-              id="remote-cursor-layer"
-              phx-update="ignore"
-              class="pointer-events-none absolute inset-0 z-[100000]"
+              id="board-world"
+              class="absolute left-0 top-0 origin-top-left"
+              style={"width: #{@workspace_width}px; height: #{@workspace_height}px;"}
             >
-            </div>
+              <div class="whiteboard-grid absolute inset-0"></div>
 
-            <%= for object <- @board_objects do %>
+              <div class="pointer-events-none absolute left-[700px] top-[360px] z-10 rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 text-slate-700 shadow-sm backdrop-blur">
+                <div class="text-sm font-bold">Canvas</div>
+                <div class="text-xs text-slate-500">
+                  Workspace 6000×4000. ПКМ — pan, колесо — zoom к курсору.
+                </div>
+              </div>
+
+              <svg
+                id="drawing-layer"
+                phx-update="ignore"
+                class="pointer-events-none absolute inset-0 z-[1] h-full w-full"
+                width={@workspace_width}
+                height={@workspace_height}
+              ></svg>
+
+              <svg
+                id="shape-preview-layer"
+                phx-update="ignore"
+                class="pointer-events-none absolute inset-0 z-[90000] h-full w-full"
+                width={@workspace_width}
+                height={@workspace_height}
+              ></svg>
+
               <div
-                id={"board-object-#{object.id}"}
-                data-board-object
-                phx-hook="BoardObjectWindow"
-                data-object-id={object.id}
-                data-object-kind={object.kind}
-                class={[
-                  "absolute border p-3 shadow-xl",
-                  "select-none transition hover:scale-[1.002]",
-                  object_container_class(object)
-                ]}
-                style={
-                  "left: #{object.x}px; top: #{object.y}px; width: #{object.width}px; height: #{object.height}px; z-index: #{object.z_index};"
-                }
+                id="remote-cursor-layer"
+                phx-update="ignore"
+                class="pointer-events-none absolute inset-0 z-[100000]"
               >
-                <div class="mb-2 flex items-center justify-between gap-2">
-                  <div class="text-xs font-bold uppercase tracking-wide opacity-70">
-                    {object_title(object.kind)}
-                  </div>
+              </div>
 
-                  <div class="flex items-center gap-1">
-                    <button
-                      type="button"
-                      phx-click="toggle_pin"
+              <%= for object <- @board_objects do %>
+                <%= if shape_object?(object) do %>
+                  <.shape_object object={object} />
+                <% else %>
+                  <div
+                    id={"board-object-#{object.id}"}
+                    data-board-object
+                    phx-hook="BoardObjectWindow"
+                    data-object-id={object.id}
+                    data-object-kind={object.kind}
+                    class={[
+                      "absolute border p-3 shadow-xl",
+                      "select-none transition hover:scale-[1.002]",
+                      object_container_class(object)
+                    ]}
+                    style={
+                      "left: #{object.x}px; top: #{object.y}px; width: #{object.width}px; height: #{object.height}px; z-index: #{object.z_index};"
+                    }
+                  >
+                    <div class="mb-2 flex items-center justify-between gap-2">
+                      <div class="text-xs font-bold uppercase tracking-wide opacity-70">
+                        {object_title(object.kind)}
+                      </div>
+
+                      <div class="flex items-center gap-1">
+                        <button
+                          type="button"
+                          phx-click="toggle_pin"
+                          phx-value-id={object.id}
+                          class={[
+                            "rounded-md px-2 py-1 text-xs font-bold hover:bg-black/10",
+                            if(object.is_pinned, do: "opacity-100", else: "opacity-50")
+                          ]}
+                          title={if object.is_pinned, do: "Unpin", else: "Pin"}
+                        >
+                          📌
+                        </button>
+
+                        <button
+                          type="button"
+                          phx-click="delete_object"
+                          phx-value-id={object.id}
+                          class="rounded-md px-2 py-1 text-xs font-bold opacity-60 hover:bg-black/10 hover:opacity-100"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+
+                    <textarea
+                      phx-blur="update_text"
                       phx-value-id={object.id}
                       class={[
-                        "rounded-md px-2 py-1 text-xs font-bold hover:bg-black/10",
-                        if(object.is_pinned, do: "opacity-100", else: "opacity-50")
+                        "w-full resize-none border-none bg-transparent text-sm leading-relaxed outline-none placeholder:text-slate-500",
+                        object_text_class(object)
                       ]}
-                      title={if object.is_pinned, do: "Unpin", else: "Pin"}
-                    >
-                      📌
-                    </button>
-
-                    <button
-                      type="button"
-                      phx-click="delete_object"
-                      phx-value-id={object.id}
-                      class="rounded-md px-2 py-1 text-xs font-bold opacity-60 hover:bg-black/10 hover:opacity-100"
-                    >
-                      ×
-                    </button>
+                    ><%= object.text %></textarea>
                   </div>
-                </div>
-
-                <%= if object.kind in ["sticky", "text", "rectangle", "circle"] do %>
-                  <textarea
-                    phx-blur="update_text"
-                    phx-value-id={object.id}
-                    class={[
-                      "w-full resize-none border-none bg-transparent text-sm leading-relaxed outline-none placeholder:text-slate-500",
-                      object_text_class(object)
-                    ]}
-                  ><%= object.text %></textarea>
                 <% end %>
-              </div>
-            <% end %>
+              <% end %>
+            </div>
           </div>
         </section>
       </main>
+    </div>
+    """
+  end
+
+  defp shape_object(assigns) do
+    ~H"""
+    <div
+      id={"board-object-#{@object.id}"}
+      data-board-object
+      phx-hook="BoardObjectWindow"
+      data-object-id={@object.id}
+      data-object-kind={@object.kind}
+      class="absolute select-none overflow-visible"
+      style={shape_style(@object)}
+    >
+      <svg
+        class="h-full w-full overflow-visible"
+        viewBox={"0 0 #{@object.width} #{@object.height}"}
+        preserveAspectRatio="none"
+      >
+        <%= if @object.kind == "arrow" do %>
+          <defs>
+            <marker
+              id={"arrowhead-#{@object.id}"}
+              markerWidth="10"
+              markerHeight="10"
+              refX="8"
+              refY="5"
+              orient="auto"
+              markerUnits="strokeWidth"
+            >
+              <path d="M 0 0 L 10 5 L 0 10 z" fill={@object.stroke_color} />
+            </marker>
+          </defs>
+        <% end %>
+
+        <%= if @object.kind in ["line", "arrow"] do %>
+          <line
+            x1="0"
+            y1={line_y(@object)}
+            x2={line_end_x(@object)}
+            y2={line_y(@object)}
+            stroke={@object.stroke_color}
+            stroke-width={@object.stroke_width}
+            stroke-linecap="round"
+            marker-end={if @object.kind == "arrow", do: "url(#arrowhead-#{@object.id})", else: nil}
+          />
+        <% end %>
+
+        <%= if @object.kind == "rectangle" do %>
+          <rect
+            x={shape_stroke_offset(@object)}
+            y={shape_stroke_offset(@object)}
+            width={shape_inner_width(@object)}
+            height={shape_inner_height(@object)}
+            fill={@object.fill_color}
+            stroke={@object.stroke_color}
+            stroke-width={@object.stroke_width}
+          />
+        <% end %>
+
+        <%= if @object.kind == "rounded_rectangle" do %>
+          <rect
+            x={shape_stroke_offset(@object)}
+            y={shape_stroke_offset(@object)}
+            width={shape_inner_width(@object)}
+            height={shape_inner_height(@object)}
+            rx="18"
+            ry="18"
+            fill={@object.fill_color}
+            stroke={@object.stroke_color}
+            stroke-width={@object.stroke_width}
+          />
+        <% end %>
+
+        <%= if @object.kind in ["ellipse", "circle"] do %>
+          <ellipse
+            cx={@object.width / 2}
+            cy={@object.height / 2}
+            rx={max(@object.width / 2 - @object.stroke_width, 1)}
+            ry={max(@object.height / 2 - @object.stroke_width, 1)}
+            fill={@object.fill_color}
+            stroke={@object.stroke_color}
+            stroke-width={@object.stroke_width}
+          />
+        <% end %>
+
+        <%= if @object.kind == "triangle" do %>
+          <polygon
+            points={triangle_points(@object)}
+            fill={@object.fill_color}
+            stroke={@object.stroke_color}
+            stroke-width={@object.stroke_width}
+            stroke-linejoin="round"
+          />
+        <% end %>
+      </svg>
     </div>
     """
   end
@@ -669,25 +855,11 @@ defmodule OpenBoardWeb.BoardLive.Show do
       text: "Text block",
       width: 260.0,
       height: 120.0,
-      color: "white"
-    }
-  end
-
-  defp object_defaults("rectangle") do
-    %{
-      kind: "rectangle",
-      text: "Rectangle",
-      width: 260.0,
-      height: 150.0
-    }
-  end
-
-  defp object_defaults("circle") do
-    %{
-      kind: "circle",
-      text: "Circle",
-      width: 170.0,
-      height: 170.0
+      color: "white",
+      rotation: 0.0,
+      stroke_color: "#0f172a",
+      fill_color: "transparent",
+      stroke_width: 2
     }
   end
 
@@ -696,9 +868,43 @@ defmodule OpenBoardWeb.BoardLive.Show do
       kind: "sticky",
       text: "New sticky note",
       width: 240.0,
-      height: 150.0
+      height: 150.0,
+      rotation: 0.0,
+      stroke_color: "#0f172a",
+      fill_color: "transparent",
+      stroke_width: 2
     }
   end
+
+  defp shape_defaults(kind, selected_color) do
+    stroke_color = drawing_color_hex(selected_color)
+
+    %{
+      kind: kind,
+      text: nil,
+      color: selected_color,
+      fill_color: shape_fill_color(kind, selected_color),
+      stroke_color: stroke_color,
+      stroke_width: 3
+    }
+  end
+
+  defp shape_fill_color(kind, selected_color)
+       when kind in ["rectangle", "rounded_rectangle", "ellipse", "triangle"] do
+    selected_color
+    |> drawing_color_hex()
+    |> transparent_fill()
+  end
+
+  defp shape_fill_color(_kind, _selected_color), do: "transparent"
+
+  defp transparent_fill("#fde047"), do: "rgba(253, 224, 71, 0.18)"
+  defp transparent_fill("#38bdf8"), do: "rgba(56, 189, 248, 0.16)"
+  defp transparent_fill("#34d399"), do: "rgba(52, 211, 153, 0.16)"
+  defp transparent_fill("#f9a8d4"), do: "rgba(249, 168, 212, 0.18)"
+  defp transparent_fill("#c084fc"), do: "rgba(192, 132, 252, 0.16)"
+  defp transparent_fill("#ffffff"), do: "rgba(255, 255, 255, 0.6)"
+  defp transparent_fill(_color), do: "transparent"
 
   defp load_board("demo"), do: Boards.get_or_create_demo_board()
   defp load_board(slug), do: Boards.get_board_by_slug(slug)
@@ -712,18 +918,18 @@ defmodule OpenBoardWeb.BoardLive.Show do
       [] ->
         {:ok, _first} =
           Boards.create_sticky_note(board, %{
-            text: "OpenBoard MVP\n\n1. Доска\n2. Стикеры\n3. Перетаскивание\n4. Realtime",
-            x: 380.0,
-            y: 160.0,
+            text: "OpenBoard MVP\n\n1. Большое поле\n2. Фигуры\n3. Zoom/Pan\n4. Realtime",
+            x: 700.0,
+            y: 520.0,
             color: "yellow",
             z_index: 1
           })
 
         {:ok, _second} =
           Boards.create_sticky_note(board, %{
-            text: "Теперь есть:\n- smooth cursors\n- realtime drawing\n- object tools",
-            x: 680.0,
-            y: 260.0,
+            text: "ПКМ — движение поля.\nWheel — zoom к курсору.\nФигуры — протяжкой ЛКМ.",
+            x: 1000.0,
+            y: 620.0,
             color: "blue",
             z_index: 2
           })
@@ -804,32 +1010,14 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   defp object_title("sticky"), do: "Sticky note"
   defp object_title("text"), do: "Text block"
-  defp object_title("rectangle"), do: "Rectangle"
-  defp object_title("circle"), do: "Circle"
   defp object_title(kind), do: kind
 
   defp object_container_class(%{kind: "text"}) do
-    "rounded-xl border-slate-500 bg-white/95 text-slate-950"
-  end
-
-  defp object_container_class(%{kind: "rectangle", color: color}) do
-    "rounded-xl #{object_color_class(color)}"
-  end
-
-  defp object_container_class(%{kind: "circle", color: color}) do
-    "rounded-full #{object_color_class(color)}"
+    "rounded-xl border-slate-300 bg-white/95 text-slate-950"
   end
 
   defp object_container_class(%{color: color}) do
     "rounded-xl #{object_color_class(color)}"
-  end
-
-  defp object_text_class(%{kind: "circle"}) do
-    "h-[calc(100%-2rem)] text-center text-slate-950"
-  end
-
-  defp object_text_class(%{kind: "text"}) do
-    "h-[calc(100%-2rem)] text-slate-950"
   end
 
   defp object_text_class(_object) do
@@ -856,4 +1044,53 @@ defmodule OpenBoardWeb.BoardLive.Show do
   defp drawing_color_hex("purple"), do: "#c084fc"
   defp drawing_color_hex("white"), do: "#ffffff"
   defp drawing_color_hex(_), do: "#fde047"
+
+  defp tool_button_class(true) do
+    "rounded-xl bg-slate-950 px-3 py-2 text-sm font-bold text-white shadow-sm hover:bg-slate-800"
+  end
+
+  defp tool_button_class(false) do
+    "rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 shadow-sm hover:bg-slate-50"
+  end
+
+  defp shape_object?(%{kind: kind}) do
+    kind in ["line", "arrow", "rectangle", "rounded_rectangle", "ellipse", "circle", "triangle"]
+  end
+
+  defp shape_style(object) do
+    "left: #{object.x}px; top: #{object.y}px; width: #{object.width}px; height: #{object.height}px; z-index: #{object.z_index}; transform: rotate(#{object.rotation || 0}deg); transform-origin: center;"
+  end
+
+  defp shape_stroke_offset(object), do: max(object.stroke_width / 2, 1)
+  defp shape_inner_width(object), do: max(object.width - object.stroke_width, 1)
+  defp shape_inner_height(object), do: max(object.height - object.stroke_width, 1)
+
+  defp triangle_points(object) do
+    top_x = object.width / 2
+    top_y = object.stroke_width
+    left_x = object.stroke_width
+    bottom_y = max(object.height - object.stroke_width, 1)
+    right_x = max(object.width - object.stroke_width, 1)
+
+    "#{top_x},#{top_y} #{right_x},#{bottom_y} #{left_x},#{bottom_y}"
+  end
+
+  defp line_y(object), do: object.height / 2
+  defp line_end_x(object), do: max(object.width, 1)
+
+  defp number_param(params, key, fallback) do
+    case Map.get(params, key) do
+      value when is_float(value) -> value
+      value when is_integer(value) -> value * 1.0
+      value when is_binary(value) -> parse_float(value, fallback)
+      _value -> fallback
+    end
+  end
+
+  defp parse_float(value, fallback) do
+    case Float.parse(value) do
+      {number, _rest} -> number
+      :error -> fallback
+    end
+  end
 end
