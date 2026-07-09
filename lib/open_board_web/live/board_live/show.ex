@@ -5,6 +5,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
   alias OpenBoardWeb.Presence
 
   @colors ["yellow", "blue", "green", "pink", "purple", "white"]
+  @tools ["select", "draw", "eraser"]
 
   @impl true
   def mount(%{"slug" => slug}, _session, socket) do
@@ -41,13 +42,21 @@ defmodule OpenBoardWeb.BoardLive.Show do
           |> assign(:current_user, user)
           |> assign(:board_objects, board_objects)
           |> assign(:online_users, list_online_users(topic))
-          |> assign(:remote_cursors, %{})
           |> assign(:selected_color, "yellow")
+          |> assign(:selected_tool, "select")
           |> assign(:available_colors, @colors)
 
         {:ok, socket}
     end
   end
+
+  @impl true
+  def handle_event("select_tool", %{"tool" => tool}, socket) when tool in @tools do
+    {:noreply, assign(socket, :selected_tool, tool)}
+  end
+
+  @impl true
+  def handle_event("select_tool", _params, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("select_color", %{"color" => color}, socket) when color in @colors do
@@ -220,21 +229,121 @@ defmodule OpenBoardWeb.BoardLive.Show do
   end
 
   @impl true
-  def handle_info({:cursor_moved, cursor}, socket) do
-    current_user = socket.assigns.current_user
+  def handle_event("drawing_erase", %{"stroke_id" => stroke_id}, socket) do
+    user = socket.assigns.current_user
 
-    if cursor.user_id == current_user.id do
+    Phoenix.PubSub.broadcast(
+      OpenBoard.PubSub,
+      socket.assigns.board_topic,
+      {:drawing_erased,
+       %{
+         user_id: user.id,
+         stroke_id: stroke_id
+       }}
+    )
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("drawing_start", %{"stroke_id" => stroke_id, "x" => x, "y" => y}, socket) do
+    user = socket.assigns.current_user
+
+    Phoenix.PubSub.broadcast(
+      OpenBoard.PubSub,
+      socket.assigns.board_topic,
+      {:drawing_started,
+       %{
+         user_id: user.id,
+         stroke_id: stroke_id,
+         x: x,
+         y: y,
+         color: drawing_color_hex(socket.assigns.selected_color),
+         width: 4
+       }}
+    )
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("drawing_point", %{"stroke_id" => stroke_id, "x" => x, "y" => y}, socket) do
+    user = socket.assigns.current_user
+
+    Phoenix.PubSub.broadcast(
+      OpenBoard.PubSub,
+      socket.assigns.board_topic,
+      {:drawing_point_added,
+       %{
+         user_id: user.id,
+         stroke_id: stroke_id,
+         x: x,
+         y: y
+       }}
+    )
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("drawing_end", %{"stroke_id" => stroke_id}, socket) do
+    user = socket.assigns.current_user
+
+    Phoenix.PubSub.broadcast(
+      OpenBoard.PubSub,
+      socket.assigns.board_topic,
+      {:drawing_finished,
+       %{
+         user_id: user.id,
+         stroke_id: stroke_id
+       }}
+    )
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({:cursor_moved, cursor}, socket) do
+    if cursor.user_id == socket.assigns.current_user.id do
       {:noreply, socket}
     else
-      remote_cursors =
-        Map.put(socket.assigns.remote_cursors, cursor.user_id, %{
-          name: cursor.name,
-          color: cursor.color,
-          x: cursor.x,
-          y: cursor.y
-        })
+      {:noreply, push_event(socket, "remote_cursor_moved", cursor)}
+    end
+  end
 
-      {:noreply, assign(socket, :remote_cursors, remote_cursors)}
+  @impl true
+  def handle_info({:drawing_started, drawing}, socket) do
+    if drawing.user_id == socket.assigns.current_user.id do
+      {:noreply, socket}
+    else
+      {:noreply, push_event(socket, "remote_drawing_started", drawing)}
+    end
+  end
+
+  @impl true
+  def handle_info({:drawing_point_added, drawing}, socket) do
+    if drawing.user_id == socket.assigns.current_user.id do
+      {:noreply, socket}
+    else
+      {:noreply, push_event(socket, "remote_drawing_point_added", drawing)}
+    end
+  end
+
+  @impl true
+  def handle_info({:drawing_finished, drawing}, socket) do
+    if drawing.user_id == socket.assigns.current_user.id do
+      {:noreply, socket}
+    else
+      {:noreply, push_event(socket, "remote_drawing_finished", drawing)}
+    end
+  end
+
+  @impl true
+  def handle_info({:drawing_erased, drawing}, socket) do
+    if drawing.user_id == socket.assigns.current_user.id do
+      {:noreply, socket}
+    else
+      {:noreply, push_event(socket, "remote_drawing_erased", drawing)}
     end
   end
 
@@ -247,17 +356,12 @@ defmodule OpenBoardWeb.BoardLive.Show do
   def handle_info(%Phoenix.Socket.Broadcast{event: "presence_diff"}, socket) do
     topic = socket.assigns.board_topic
     online_users = list_online_users(topic)
-    online_user_ids = MapSet.new(Enum.map(online_users, & &1.id))
-
-    remote_cursors =
-      socket.assigns.remote_cursors
-      |> Enum.reject(fn {user_id, _cursor} -> not MapSet.member?(online_user_ids, user_id) end)
-      |> Map.new()
+    online_user_ids = Enum.map(online_users, & &1.id)
 
     socket =
       socket
       |> assign(:online_users, online_users)
-      |> assign(:remote_cursors, remote_cursors)
+      |> push_event("presence_sync", %{user_ids: online_user_ids})
 
     {:noreply, socket}
   end
@@ -269,10 +373,10 @@ defmodule OpenBoardWeb.BoardLive.Show do
       <header class="flex h-16 items-center justify-between border-b border-slate-800 bg-slate-900 px-6">
         <div>
           <div class="text-lg font-semibold tracking-tight">OpenBoard</div>
-          
+
           <div class="text-xs text-slate-400">Interactive board prototype</div>
         </div>
-        
+
         <div class="flex items-center gap-3">
           <.link
             navigate={~p"/boards"}
@@ -280,37 +384,88 @@ defmodule OpenBoardWeb.BoardLive.Show do
           >
             Boards
           </.link>
-          
+
           <div class="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300">
             {Enum.count(@online_users)} online
           </div>
         </div>
       </header>
-      
+
       <main class="flex h-[calc(100vh-4rem)]">
         <aside class="w-72 overflow-y-auto border-r border-slate-800 bg-slate-900/80 p-5">
           <div class="mb-6">
             <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Board</div>
-            
+
             <div class="mt-2 text-xl font-semibold">{@board.title}</div>
-            
+
             <div class="mt-1 text-sm text-slate-400">/boards/{@board.slug}</div>
           </div>
-          
+
           <div class="space-y-3">
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
-              <div class="text-sm font-semibold">Tools</div>
-              
+              <div class="text-sm font-semibold">Mode</div>
+
+              <div class="mt-3 grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  phx-click="select_tool"
+                  phx-value-tool="select"
+                  class={[
+                    "rounded-lg px-3 py-2 text-sm font-semibold",
+                    if(@selected_tool == "select",
+                      do: "bg-orange-500 text-white hover:bg-orange-400",
+                      else: "border border-slate-700 text-slate-200 hover:bg-slate-800"
+                    )
+                  ]}
+                >
+                  Select
+                </button>
+
+                <button
+                  type="button"
+                  phx-click="select_tool"
+                  phx-value-tool="draw"
+                  class={[
+                    "rounded-lg px-3 py-2 text-sm font-semibold",
+                    if(@selected_tool == "draw",
+                      do: "bg-orange-500 text-white hover:bg-orange-400",
+                      else: "border border-slate-700 text-slate-200 hover:bg-slate-800"
+                    )
+                  ]}
+                >
+                  Draw
+                </button>
+
+                <button
+                  type="button"
+                  phx-click="select_tool"
+                  phx-value-tool="eraser"
+                  class={[
+                    "rounded-lg px-3 py-2 text-sm font-semibold",
+                    if(@selected_tool == "eraser",
+                      do: "bg-orange-500 text-white hover:bg-orange-400",
+                      else: "border border-slate-700 text-slate-200 hover:bg-slate-800"
+                    )
+                  ]}
+                >
+                  Erase
+                </button>
+              </div>
+            </div>
+
+            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
+              <div class="text-sm font-semibold">Objects</div>
+
               <div class="mt-3 grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   phx-click="create_object"
                   phx-value-kind="sticky"
-                  class="rounded-lg bg-orange-500 px-3 py-2 text-sm font-semibold text-white hover:bg-orange-400"
+                  class="rounded-lg border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800"
                 >
                   Sticky
                 </button>
-                
+
                 <button
                   type="button"
                   phx-click="create_object"
@@ -319,7 +474,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 >
                   Text
                 </button>
-                
+
                 <button
                   type="button"
                   phx-click="create_object"
@@ -328,7 +483,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 >
                   Rectangle
                 </button>
-                
+
                 <button
                   type="button"
                   phx-click="create_object"
@@ -339,14 +494,14 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 </button>
               </div>
             </div>
-            
+
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="flex items-center justify-between">
                 <div class="text-sm font-semibold">Color</div>
-                
+
                 <div class="text-xs text-slate-500">{@selected_color}</div>
               </div>
-              
+
               <div class="mt-3 grid grid-cols-6 gap-2">
                 <%= for color <- @available_colors do %>
                   <button
@@ -363,35 +518,35 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 <% end %>
               </div>
             </div>
-            
+
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="text-sm font-semibold">You</div>
-              
+
               <div class="mt-3 flex items-center gap-3">
                 <div class="h-3 w-3 rounded-full" style={"background-color: #{@current_user.color};"}>
                 </div>
-                
+
                 <div>
                   <div class="text-sm font-semibold">{@current_user.name}</div>
-                  
+
                   <div class="text-xs text-slate-500">{short_guest_id(@current_user.id)}</div>
                 </div>
               </div>
             </div>
-            
+
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="flex items-center justify-between">
                 <div class="text-sm font-semibold">Online users</div>
-                
+
                 <div class="text-xs text-slate-500">{Enum.count(@online_users)}</div>
               </div>
-              
+
               <div class="mt-3 space-y-3">
                 <%= for user <- @online_users do %>
                   <div class="flex items-center gap-3">
                     <div class="h-3 w-3 rounded-full" style={"background-color: #{user.color};"}>
                     </div>
-                    
+
                     <div class="min-w-0">
                       <div class="truncate text-sm font-medium">
                         {user.name}
@@ -404,54 +559,49 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 <% end %>
               </div>
             </div>
-            
+
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
-              <div class="text-sm font-semibold">Objects</div>
-              
+              <div class="text-sm font-semibold">Board objects</div>
+
               <div class="mt-1 text-2xl font-bold">{Enum.count(@board_objects)}</div>
             </div>
           </div>
         </aside>
-        
+
         <section class="relative flex-1 overflow-hidden bg-slate-950">
           <div class="absolute inset-0 opacity-40 board-grid"></div>
-          
+
           <div class="absolute left-6 top-6 z-10 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl">
             <div class="text-sm font-semibold">Canvas</div>
-            
+
             <div class="text-xs text-slate-400">
-              Drag from anywhere. Resize from edges like a normal window.
+              Select: move/resize objects. Draw: realtime ink stroke.
             </div>
           </div>
-          
+
           <div
             id="board-canvas"
-            phx-hook="BoardCursor"
+            phx-hook="BoardSurface"
+            data-selected-tool={@selected_tool}
+            data-selected-color={drawing_color_hex(@selected_color)}
             class="relative h-full w-full overflow-hidden"
           >
-            <%= for {_user_id, cursor} <- @remote_cursors do %>
-              <div
-                class="pointer-events-none absolute z-[1000]"
-                style={"left: #{cursor.x}px; top: #{cursor.y}px;"}
-              >
-                <div
-                  class="h-0 w-0 border-l-[8px] border-r-[8px] border-t-[14px] border-l-transparent border-r-transparent"
-                  style={"border-top-color: #{cursor.color}; transform: rotate(-35deg);"}
-                >
-                </div>
-                
-                <div
-                  class="mt-1 rounded-md px-2 py-1 text-xs font-semibold text-white shadow"
-                  style={"background-color: #{cursor.color};"}
-                >
-                  {cursor.name}
-                </div>
-              </div>
-            <% end %>
-            
+            <svg
+              id="drawing-layer"
+              phx-update="ignore"
+              class="pointer-events-none absolute inset-0 z-0 h-full w-full"
+            ></svg>
+            <div
+              id="remote-cursor-layer"
+              phx-update="ignore"
+              class="pointer-events-none absolute inset-0 z-[100000]"
+            >
+            </div>
+
             <%= for object <- @board_objects do %>
               <div
                 id={"board-object-#{object.id}"}
+                data-board-object
                 phx-hook="BoardObjectWindow"
                 data-object-id={object.id}
                 data-object-kind={object.kind}
@@ -468,7 +618,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   <div class="text-xs font-bold uppercase tracking-wide opacity-70">
                     {object_title(object.kind)}
                   </div>
-                  
+
                   <div class="flex items-center gap-1">
                     <button
                       type="button"
@@ -482,7 +632,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     >
                       📌
                     </button>
-                    
+
                     <button
                       type="button"
                       phx-click="delete_object"
@@ -493,7 +643,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     </button>
                   </div>
                 </div>
-                
+
                 <%= if object.kind in ["sticky", "text", "rectangle", "circle"] do %>
                   <textarea
                     phx-blur="update_text"
@@ -571,7 +721,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
         {:ok, _second} =
           Boards.create_sticky_note(board, %{
-            text: "Теперь есть:\n- online presence\n- live cursors\n- multi-tab sync",
+            text: "Теперь есть:\n- smooth cursors\n- realtime drawing\n- object tools",
             x: 680.0,
             y: 260.0,
             color: "blue",
@@ -699,4 +849,11 @@ defmodule OpenBoardWeb.BoardLive.Show do
   defp color_dot_class("purple"), do: "bg-purple-300"
   defp color_dot_class("white"), do: "bg-white"
   defp color_dot_class(_), do: "bg-yellow-300"
+
+  defp drawing_color_hex("blue"), do: "#38bdf8"
+  defp drawing_color_hex("green"), do: "#34d399"
+  defp drawing_color_hex("pink"), do: "#f9a8d4"
+  defp drawing_color_hex("purple"), do: "#c084fc"
+  defp drawing_color_hex("white"), do: "#ffffff"
+  defp drawing_color_hex(_), do: "#fde047"
 end
