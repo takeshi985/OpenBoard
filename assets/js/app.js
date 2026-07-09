@@ -12,6 +12,10 @@ const EDGE_SIZE = 10
 const MIN_WIDTH = 110
 const MIN_HEIGHT = 80
 const CIRCLE_MIN_SIZE = 90
+const CURSOR_SEND_INTERVAL = 33
+const DRAW_SEND_INTERVAL = 16
+const ERASER_SEND_INTERVAL = 24
+const ERASER_RADIUS = 18
 
 function getOrCreateGuestSession() {
   const idKey = "open_board_guest_id"
@@ -59,6 +63,15 @@ function clamp(value, min) {
   return Math.max(min, Math.round(value))
 }
 
+function getCanvasPoint(element, event) {
+  const rect = element.getBoundingClientRect()
+
+  return {
+    x: Math.round(event.clientX - rect.left),
+    y: Math.round(event.clientY - rect.top)
+  }
+}
+
 function getResizeMode(element, event) {
   const rect = element.getBoundingClientRect()
 
@@ -101,39 +114,469 @@ function cursorForResizeMode(mode) {
   }
 }
 
-Hooks.BoardCursor = {
-  mounted() {
-    this.lastSentAt = 0
+function createSvgPath(svg, strokeId, x, y, color, width) {
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path")
 
-    this.onPointerMove = (event) => {
-      const now = Date.now()
+  path.dataset.strokeId = strokeId
+  path.dataset.points = `${x},${y}`
+  path.setAttribute("d", `M ${x} ${y}`)
+  path.setAttribute("fill", "none")
+  path.setAttribute("stroke", color)
+  path.setAttribute("stroke-width", width)
+  path.setAttribute("stroke-linecap", "round")
+  path.setAttribute("stroke-linejoin", "round")
 
-      if (now - this.lastSentAt < 50) {
-        return
+  svg.appendChild(path)
+
+  return path
+}
+
+function appendSvgPoint(path, x, y) {
+  if (!path) {
+    return
+  }
+
+  const points = path.dataset.points || ""
+  path.dataset.points = `${points} ${x},${y}`.trim()
+
+  const commands = path.dataset.points
+    .split(" ")
+    .map((point, index) => {
+      const [pointX, pointY] = point.split(",")
+
+      if (index === 0) {
+        return `M ${pointX} ${pointY}`
       }
 
-      this.lastSentAt = now
+      return `L ${pointX} ${pointY}`
+    })
+    .join(" ")
 
-      const rect = this.el.getBoundingClientRect()
-      const x = Math.round(event.clientX - rect.left)
-      const y = Math.round(event.clientY - rect.top)
+  path.setAttribute("d", commands)
+}
 
-      if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
-        return
+function distanceBetween(pointA, pointB) {
+  const dx = pointA.x - pointB.x
+  const dy = pointA.y - pointB.y
+
+  return Math.sqrt(dx * dx + dy * dy)
+}
+
+function isPointNearPath(point, path, radius) {
+  try {
+    const length = path.getTotalLength()
+    const samples = Math.max(12, Math.ceil(length / 10))
+
+    for (let index = 0; index <= samples; index += 1) {
+      const pathPoint = path.getPointAtLength((length * index) / samples)
+
+      if (distanceBetween(point, { x: pathPoint.x, y: pathPoint.y }) <= radius) {
+        return true
       }
-
-      this.pushEvent("cursor_move", {
-        x: x,
-        y: y
-      })
     }
 
+    return false
+  } catch (_error) {
+    return false
+  }
+}
+
+Hooks.BoardSurface = {
+  mounted() {
+    this.guest = getOrCreateGuestSession()
+    this.cursorLayer = document.getElementById("remote-cursor-layer")
+    this.drawingLayer = document.getElementById("drawing-layer")
+
+    this.remoteCursors = new Map()
+    this.remoteStrokes = new Map()
+
+    this.lastCursorSentAt = 0
+    this.lastDrawSentAt = 0
+    this.lastEraseSentAt = 0
+
+    this.isDrawing = false
+    this.isErasing = false
+    this.currentStrokeId = null
+    this.currentLocalPath = null
+
+    this.updateDatasetState()
+
+    this.onPointerMove = (event) => {
+      this.sendCursorMove(event)
+
+      if (this.isDrawing) {
+        this.addLocalDrawingPoint(event)
+      }
+
+      if (this.isErasing) {
+        this.eraseAtPointer(event)
+      }
+    }
+
+    this.onPointerDown = (event) => {
+      this.updateDatasetState()
+
+      if (event.button !== 0) {
+        return
+      }
+
+      if (event.target.closest("[data-board-object]")) {
+        return
+      }
+
+      if (this.selectedTool === "draw") {
+        this.startDrawing(event)
+        return
+      }
+
+      if (this.selectedTool === "eraser") {
+        this.startErasing(event)
+      }
+    }
+
+    this.onDocumentPointerMove = (event) => {
+      if (this.isDrawing) {
+        this.addLocalDrawingPoint(event)
+      }
+
+      if (this.isErasing) {
+        this.eraseAtPointer(event)
+      }
+    }
+
+    this.onDocumentPointerUp = () => {
+      if (this.isDrawing) {
+        this.finishDrawing()
+      }
+
+      if (this.isErasing) {
+        this.finishErasing()
+      }
+    }
+
+    this.handleEvent("remote_cursor_moved", (cursor) => {
+      this.renderRemoteCursor(cursor)
+    })
+
+    this.handleEvent("presence_sync", ({ user_ids }) => {
+      this.cleanupRemoteCursors(user_ids)
+    })
+
+    this.handleEvent("remote_drawing_started", (drawing) => {
+      if (drawing.user_id === this.guest.id) {
+        return
+      }
+
+      this.ensureClientLayers()
+
+      const path = createSvgPath(
+        this.drawingLayer,
+        drawing.stroke_id,
+        drawing.x,
+        drawing.y,
+        drawing.color,
+        drawing.width
+      )
+
+      this.remoteStrokes.set(drawing.stroke_id, path)
+    })
+
+    this.handleEvent("remote_drawing_point_added", (drawing) => {
+      if (drawing.user_id === this.guest.id) {
+        return
+      }
+
+      const path = this.remoteStrokes.get(drawing.stroke_id) || this.findStrokePath(drawing.stroke_id)
+      appendSvgPoint(path, drawing.x, drawing.y)
+    })
+
+    this.handleEvent("remote_drawing_finished", (drawing) => {
+      this.remoteStrokes.delete(drawing.stroke_id)
+    })
+
+    this.handleEvent("remote_drawing_erased", (drawing) => {
+      this.removeStroke(drawing.stroke_id)
+    })
+
     this.el.addEventListener("pointermove", this.onPointerMove)
+    this.el.addEventListener("pointerdown", this.onPointerDown)
+  },
+
+  updated() {
+    this.updateDatasetState()
+    this.ensureClientLayers()
+    this.reconnectRemoteCursorElements()
   },
 
   destroyed() {
     if (this.onPointerMove) {
       this.el.removeEventListener("pointermove", this.onPointerMove)
+    }
+
+    if (this.onPointerDown) {
+      this.el.removeEventListener("pointerdown", this.onPointerDown)
+    }
+
+    if (this.onDocumentPointerMove) {
+      document.removeEventListener("pointermove", this.onDocumentPointerMove)
+    }
+
+    if (this.onDocumentPointerUp) {
+      document.removeEventListener("pointerup", this.onDocumentPointerUp)
+    }
+  },
+
+  updateDatasetState() {
+    this.selectedTool = this.el.dataset.selectedTool || "select"
+    this.selectedColor = this.el.dataset.selectedColor || "#fde047"
+
+    if (this.selectedTool === "draw") {
+      this.el.style.cursor = "crosshair"
+    } else if (this.selectedTool === "eraser") {
+      this.el.style.cursor = "cell"
+    } else {
+      this.el.style.cursor = "default"
+    }
+  },
+
+  ensureClientLayers() {
+    this.cursorLayer = document.getElementById("remote-cursor-layer")
+    this.drawingLayer = document.getElementById("drawing-layer")
+  },
+
+  reconnectRemoteCursorElements() {
+    for (const [userId, element] of this.remoteCursors.entries()) {
+      if (!element.isConnected) {
+        this.remoteCursors.delete(userId)
+      }
+    }
+  },
+
+  isPointInside(point) {
+    return (
+      point.x >= 0 &&
+      point.y >= 0 &&
+      point.x <= this.el.clientWidth &&
+      point.y <= this.el.clientHeight
+    )
+  },
+
+  sendCursorMove(event) {
+    const now = Date.now()
+
+    if (now - this.lastCursorSentAt < CURSOR_SEND_INTERVAL) {
+      return
+    }
+
+    this.lastCursorSentAt = now
+
+    const point = getCanvasPoint(this.el, event)
+
+    if (!this.isPointInside(point)) {
+      return
+    }
+
+    this.pushEvent("cursor_move", {
+      x: point.x,
+      y: point.y
+    })
+  },
+
+  startDrawing(event) {
+    event.preventDefault()
+
+    const point = getCanvasPoint(this.el, event)
+
+    if (!this.isPointInside(point)) {
+      return
+    }
+
+    this.ensureClientLayers()
+
+    this.isDrawing = true
+    this.currentStrokeId = `stroke-${this.guest.id}-${Date.now()}-${Math.floor(Math.random() * 100000)}`
+    this.currentLocalPath = createSvgPath(
+      this.drawingLayer,
+      this.currentStrokeId,
+      point.x,
+      point.y,
+      this.selectedColor,
+      4
+    )
+
+    this.pushEvent("drawing_start", {
+      stroke_id: this.currentStrokeId,
+      x: point.x,
+      y: point.y
+    })
+
+    document.addEventListener("pointermove", this.onDocumentPointerMove)
+    document.addEventListener("pointerup", this.onDocumentPointerUp)
+  },
+
+  addLocalDrawingPoint(event) {
+    const now = Date.now()
+
+    if (now - this.lastDrawSentAt < DRAW_SEND_INTERVAL) {
+      return
+    }
+
+    this.lastDrawSentAt = now
+
+    const point = getCanvasPoint(this.el, event)
+
+    if (!this.isPointInside(point)) {
+      return
+    }
+
+    appendSvgPoint(this.currentLocalPath, point.x, point.y)
+
+    this.pushEvent("drawing_point", {
+      stroke_id: this.currentStrokeId,
+      x: point.x,
+      y: point.y
+    })
+  },
+
+  finishDrawing() {
+    this.isDrawing = false
+
+    document.removeEventListener("pointermove", this.onDocumentPointerMove)
+    document.removeEventListener("pointerup", this.onDocumentPointerUp)
+
+    this.pushEvent("drawing_end", {
+      stroke_id: this.currentStrokeId
+    })
+
+    this.currentStrokeId = null
+    this.currentLocalPath = null
+  },
+
+  startErasing(event) {
+    event.preventDefault()
+
+    this.isErasing = true
+    this.eraseAtPointer(event)
+
+    document.addEventListener("pointermove", this.onDocumentPointerMove)
+    document.addEventListener("pointerup", this.onDocumentPointerUp)
+  },
+
+  eraseAtPointer(event) {
+    const now = Date.now()
+
+    if (now - this.lastEraseSentAt < ERASER_SEND_INTERVAL) {
+      return
+    }
+
+    this.lastEraseSentAt = now
+
+    const point = getCanvasPoint(this.el, event)
+
+    if (!this.isPointInside(point)) {
+      return
+    }
+
+    this.ensureClientLayers()
+
+    const paths = Array.from(this.drawingLayer.querySelectorAll("path[data-stroke-id]"))
+
+    for (const path of paths) {
+      if (isPointNearPath(point, path, ERASER_RADIUS)) {
+        const strokeId = path.dataset.strokeId
+
+        this.removeStroke(strokeId)
+
+        this.pushEvent("drawing_erase", {
+          stroke_id: strokeId
+        })
+      }
+    }
+  },
+
+  finishErasing() {
+    this.isErasing = false
+
+    document.removeEventListener("pointermove", this.onDocumentPointerMove)
+    document.removeEventListener("pointerup", this.onDocumentPointerUp)
+  },
+
+  findStrokePath(strokeId) {
+    this.ensureClientLayers()
+
+    if (!this.drawingLayer) {
+      return null
+    }
+
+    return this.drawingLayer.querySelector(`path[data-stroke-id="${strokeId}"]`)
+  },
+
+  removeStroke(strokeId) {
+    const path = this.findStrokePath(strokeId)
+
+    if (path) {
+      path.remove()
+    }
+
+    this.remoteStrokes.delete(strokeId)
+  },
+
+  renderRemoteCursor(cursor) {
+    this.ensureClientLayers()
+
+    if (!this.cursorLayer || cursor.user_id === this.guest.id) {
+      return
+    }
+
+    let cursorElement = this.remoteCursors.get(cursor.user_id)
+
+    if (cursorElement && !cursorElement.isConnected) {
+      this.remoteCursors.delete(cursor.user_id)
+      cursorElement = null
+    }
+
+    if (!cursorElement) {
+      cursorElement = document.createElement("div")
+      cursorElement.className = "absolute pointer-events-none transition-transform duration-75 ease-linear"
+      cursorElement.dataset.userId = cursor.user_id
+
+      cursorElement.innerHTML = `
+        <div style="
+          width: 0;
+          height: 0;
+          border-left: 8px solid transparent;
+          border-right: 8px solid transparent;
+          border-top: 14px solid ${cursor.color};
+          transform: rotate(-35deg);
+        "></div>
+        <div style="
+          margin-top: 4px;
+          border-radius: 6px;
+          padding: 4px 8px;
+          background: ${cursor.color};
+          color: white;
+          font-size: 12px;
+          font-weight: 700;
+          box-shadow: 0 10px 15px rgba(0, 0, 0, 0.25);
+          white-space: nowrap;
+        ">${cursor.name}</div>
+      `
+
+      this.cursorLayer.appendChild(cursorElement)
+      this.remoteCursors.set(cursor.user_id, cursorElement)
+    }
+
+    cursorElement.style.transform = `translate3d(${cursor.x}px, ${cursor.y}px, 0)`
+  },
+
+  cleanupRemoteCursors(activeUserIds) {
+    const activeSet = new Set(activeUserIds)
+
+    for (const [userId, element] of this.remoteCursors.entries()) {
+      if (!activeSet.has(userId)) {
+        element.remove()
+        this.remoteCursors.delete(userId)
+      }
     }
   }
 }
@@ -161,6 +604,11 @@ Hooks.BoardObjectWindow = {
         return
       }
 
+      if ((this.canvas.dataset.selectedTool || "select") !== "select") {
+        this.el.style.cursor = "auto"
+        return
+      }
+
       if (event.target.closest("button") || event.target.closest("textarea")) {
         this.el.style.cursor = "auto"
         return
@@ -171,6 +619,10 @@ Hooks.BoardObjectWindow = {
     }
 
     this.onPointerDown = (event) => {
+      if ((this.canvas.dataset.selectedTool || "select") !== "select") {
+        return
+      }
+
       if (event.button !== 0) {
         return
       }
