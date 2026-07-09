@@ -287,7 +287,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
   end
 
   @impl true
-  def handle_event("drawing_start", %{"stroke_id" => stroke_id, "x" => x, "y" => y}, socket) do
+  def handle_event("drawing_start", params, socket) do
     user = socket.assigns.current_user
 
     Phoenix.PubSub.broadcast(
@@ -296,11 +296,12 @@ defmodule OpenBoardWeb.BoardLive.Show do
       {:drawing_started,
        %{
          user_id: user.id,
-         stroke_id: stroke_id,
-         x: x,
-         y: y,
+         stroke_id: Map.get(params, "stroke_id"),
+         x: number_param(params, "x", 0.0),
+         y: number_param(params, "y", 0.0),
          color: drawing_color_hex(socket.assigns.selected_color),
-         width: 4
+         width: 4,
+         smoothing_epsilon: number_param(params, "smoothing_epsilon", 2.0)
        }}
     )
 
@@ -655,39 +656,40 @@ defmodule OpenBoardWeb.BoardLive.Show do
             class="absolute inset-0 overflow-hidden"
           >
             <div
+              id="viewport-grid"
+              phx-update="ignore"
+              class="pointer-events-none absolute inset-0 z-0"
+            >
+            </div>
+
+            <svg
+              id="drawing-layer"
+              phx-update="ignore"
+              class="pointer-events-none absolute inset-0 z-[1] h-full w-full"
+            ></svg>
+            <svg
+              id="shape-preview-layer"
+              phx-update="ignore"
+              class="pointer-events-none absolute inset-0 z-[90000] h-full w-full"
+            ></svg>
+            <div
+              id="remote-cursor-layer"
+              phx-update="ignore"
+              class="pointer-events-none absolute inset-0 z-[100000]"
+            >
+            </div>
+
+            <div
               id="board-world"
               class="absolute left-0 top-0 origin-top-left"
               style={"width: #{@workspace_width}px; height: #{@workspace_height}px;"}
             >
-              <div class="whiteboard-grid absolute inset-0"></div>
-
               <div class="pointer-events-none absolute left-[700px] top-[360px] z-10 rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 text-slate-700 shadow-sm backdrop-blur">
                 <div class="text-sm font-bold">Canvas</div>
 
                 <div class="text-xs text-slate-500">
                   Workspace 6000×4000. ПКМ — pan, колесо — zoom к курсору.
                 </div>
-              </div>
-
-              <svg
-                id="drawing-layer"
-                phx-update="ignore"
-                class="pointer-events-none absolute inset-0 z-[1] h-full w-full"
-                width={@workspace_width}
-                height={@workspace_height}
-              ></svg>
-              <svg
-                id="shape-preview-layer"
-                phx-update="ignore"
-                class="pointer-events-none absolute inset-0 z-[90000] h-full w-full"
-                width={@workspace_width}
-                height={@workspace_height}
-              ></svg>
-              <div
-                id="remote-cursor-layer"
-                phx-update="ignore"
-                class="pointer-events-none absolute inset-0 z-[100000]"
-              >
               </div>
 
               <%= for object <- @board_objects do %>
@@ -798,6 +800,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             stroke={@object.stroke_color}
             stroke-width={@object.stroke_width}
             stroke-linecap="round"
+            vector-effect="non-scaling-stroke"
             marker-end={if @object.kind == "arrow", do: "url(#arrowhead-#{@object.id})", else: nil}
           />
         <% end %>
@@ -811,6 +814,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             fill={@object.fill_color}
             stroke={@object.stroke_color}
             stroke-width={@object.stroke_width}
+            vector-effect="non-scaling-stroke"
           />
         <% end %>
 
@@ -825,6 +829,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             fill={@object.fill_color}
             stroke={@object.stroke_color}
             stroke-width={@object.stroke_width}
+            vector-effect="non-scaling-stroke"
           />
         <% end %>
 
@@ -837,6 +842,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             fill={@object.fill_color}
             stroke={@object.stroke_color}
             stroke-width={@object.stroke_width}
+            vector-effect="non-scaling-stroke"
           />
         <% end %>
 
@@ -847,6 +853,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             stroke={@object.stroke_color}
             stroke-width={@object.stroke_width}
             stroke-linejoin="round"
+            vector-effect="non-scaling-stroke"
           />
         <% end %>
       </svg>
