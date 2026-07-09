@@ -5,35 +5,44 @@ defmodule OpenBoardWeb.BoardLive.Show do
   alias OpenBoardWeb.Presence
 
   @impl true
-  def mount(_params, _session, socket) do
-    board = Boards.get_or_create_demo_board()
-    board_objects = load_or_seed_demo_objects(board)
+  def mount(%{"slug" => slug}, _session, socket) do
+    case load_board(slug) do
+      nil ->
+        socket =
+          socket
+          |> put_flash(:error, "Board not found")
+          |> push_navigate(to: ~p"/boards")
 
-    user = build_guest_user(socket)
-    topic = board_topic(board)
+        {:ok, socket}
 
-    if connected?(socket) do
-      Phoenix.PubSub.subscribe(OpenBoard.PubSub, topic)
+      board ->
+        board_objects = load_or_seed_demo_objects(board)
+        user = build_guest_user(socket)
+        topic = board_topic(board)
 
-      Presence.track(self(), topic, user.id, %{
-        id: user.id,
-        name: user.name,
-        color: user.color,
-        joined_at: DateTime.utc_now()
-      })
+        if connected?(socket) do
+          Phoenix.PubSub.subscribe(OpenBoard.PubSub, topic)
+
+          Presence.track(self(), topic, user.id, %{
+            id: user.id,
+            name: user.name,
+            color: user.color,
+            joined_at: DateTime.utc_now()
+          })
+        end
+
+        socket =
+          socket
+          |> assign(:page_title, board.title)
+          |> assign(:board, board)
+          |> assign(:board_topic, topic)
+          |> assign(:current_user, user)
+          |> assign(:board_objects, board_objects)
+          |> assign(:online_users, list_online_users(topic))
+          |> assign(:remote_cursors, %{})
+
+        {:ok, socket}
     end
-
-    socket =
-      socket
-      |> assign(:page_title, "OpenBoard Demo")
-      |> assign(:board, board)
-      |> assign(:board_topic, topic)
-      |> assign(:current_user, user)
-      |> assign(:board_objects, board_objects)
-      |> assign(:online_users, list_online_users(topic))
-      |> assign(:remote_cursors, %{})
-
-    {:ok, socket}
   end
 
   @impl true
@@ -171,14 +180,22 @@ defmodule OpenBoardWeb.BoardLive.Show do
       <header class="flex h-16 items-center justify-between border-b border-slate-800 bg-slate-900 px-6">
         <div>
           <div class="text-lg font-semibold tracking-tight">OpenBoard</div>
+          
           <div class="text-xs text-slate-400">Interactive board prototype</div>
         </div>
-
+        
         <div class="flex items-center gap-3">
+          <.link
+            navigate={~p"/boards"}
+            class="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800"
+          >
+            Boards
+          </.link>
+          
           <div class="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300">
             {Enum.count(@online_users)} online
           </div>
-
+          
           <button
             type="button"
             phx-click="create_sticky"
@@ -188,45 +205,49 @@ defmodule OpenBoardWeb.BoardLive.Show do
           </button>
         </div>
       </header>
-
+      
       <main class="flex h-[calc(100vh-4rem)]">
         <aside class="w-72 border-r border-slate-800 bg-slate-900/80 p-5">
           <div class="mb-6">
             <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Board</div>
+            
             <div class="mt-2 text-xl font-semibold">{@board.title}</div>
-            <div class="mt-1 text-sm text-slate-400">/boards/demo</div>
+            
+            <div class="mt-1 text-sm text-slate-400">/boards/{@board.slug}</div>
           </div>
-
+          
           <div class="space-y-3">
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="text-sm font-semibold">You</div>
-
+              
               <div class="mt-3 flex items-center gap-3">
                 <div
                   class="h-3 w-3 rounded-full"
                   style={"background-color: #{@current_user.color};"}
                 >
                 </div>
-
+                
                 <div>
                   <div class="text-sm font-semibold">{@current_user.name}</div>
+                  
                   <div class="text-xs text-slate-500">{short_guest_id(@current_user.id)}</div>
                 </div>
               </div>
             </div>
-
+            
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="flex items-center justify-between">
                 <div class="text-sm font-semibold">Online users</div>
+                
                 <div class="text-xs text-slate-500">{Enum.count(@online_users)}</div>
               </div>
-
+              
               <div class="mt-3 space-y-3">
                 <%= for user <- @online_users do %>
                   <div class="flex items-center gap-3">
                     <div class="h-3 w-3 rounded-full" style={"background-color: #{user.color};"}>
                     </div>
-
+                    
                     <div class="min-w-0">
                       <div class="truncate text-sm font-medium">
                         {user.name}
@@ -239,37 +260,26 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 <% end %>
               </div>
             </div>
-
+            
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="text-sm font-semibold">Objects</div>
+              
               <div class="mt-1 text-2xl font-bold">{Enum.count(@board_objects)}</div>
-            </div>
-
-            <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
-              <div class="text-sm font-semibold">Current features</div>
-              <ul class="mt-3 space-y-2 text-sm text-slate-400">
-                <li>• Create sticky notes</li>
-                <li>• Edit text</li>
-                <li>• Drag and drop</li>
-                <li>• Save position</li>
-                <li>• Online presence</li>
-                <li>• Live cursors</li>
-                <li>• Multi-tab sync</li>
-              </ul>
             </div>
           </div>
         </aside>
-
+        
         <section class="relative flex-1 overflow-hidden bg-slate-950">
           <div class="absolute inset-0 opacity-40 board-grid"></div>
-
+          
           <div class="absolute left-6 top-6 z-10 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl">
             <div class="text-sm font-semibold">Canvas</div>
+            
             <div class="text-xs text-slate-400">
-              Обновление страницы больше не создает нового участника в той же вкладке.
+              Board URL: /boards/{@board.slug}
             </div>
           </div>
-
+          
           <div
             id="board-canvas"
             phx-hook="BoardCursor"
@@ -285,7 +295,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   style={"border-top-color: #{cursor.color}; transform: rotate(-35deg);"}
                 >
                 </div>
-
+                
                 <div
                   class="mt-1 rounded-md px-2 py-1 text-xs font-semibold text-white shadow"
                   style={"background-color: #{cursor.color};"}
@@ -294,7 +304,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 </div>
               </div>
             <% end %>
-
+            
             <%= for object <- @board_objects do %>
               <div
                 id={"board-object-#{object.id}"}
@@ -317,7 +327,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   <div class="text-xs font-bold uppercase tracking-wide opacity-70">
                     Sticky note
                   </div>
-
+                  
                   <button
                     type="button"
                     phx-click="delete_object"
@@ -327,8 +337,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     ×
                   </button>
                 </div>
-
-                <textarea
+                 <textarea
                   phx-blur="update_text"
                   phx-value-id={object.id}
                   class="h-[calc(100%-2rem)] w-full resize-none border-none bg-transparent text-sm leading-relaxed text-slate-950 outline-none placeholder:text-slate-500"
@@ -341,6 +350,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
     </div>
     """
   end
+
+  defp load_board("demo"), do: Boards.get_or_create_demo_board()
+  defp load_board(slug), do: Boards.get_board_by_slug(slug)
 
   defp reload_board_objects(socket) do
     assign(socket, :board_objects, Boards.list_board_objects(socket.assigns.board))

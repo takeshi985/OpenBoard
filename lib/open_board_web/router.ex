@@ -19,7 +19,8 @@ defmodule OpenBoardWeb.Router do
 
     get "/", PageController, :home
 
-    live "/boards/demo", BoardLive.Show, :demo
+    live "/boards", BoardLive.Index, :index
+    live "/boards/:slug", BoardLive.Show, :show
   end
 
   if Application.compile_env(:open_board, :dev_routes) do

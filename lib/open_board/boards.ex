@@ -40,6 +40,25 @@ defmodule OpenBoard.Boards do
     end
   end
 
+  def create_board_from_title(title) do
+    clean_title =
+      title
+      |> to_string()
+      |> String.trim()
+
+    title =
+      case clean_title do
+        "" -> "Untitled Board"
+        value -> value
+      end
+
+    create_board(%{
+      title: title,
+      slug: generate_unique_slug(),
+      is_public: true
+    })
+  end
+
   def create_board(attrs \\ %{}) do
     %Board{}
     |> Board.changeset(attrs)
@@ -103,5 +122,19 @@ defmodule OpenBoard.Boards do
 
   def change_board_object(%BoardObject{} = board_object, attrs \\ %{}) do
     BoardObject.changeset(board_object, attrs)
+  end
+
+  defp generate_unique_slug do
+    slug =
+      5
+      |> :crypto.strong_rand_bytes()
+      |> Base.url_encode64(padding: false)
+      |> String.downcase()
+      |> then(&"board-#{&1}")
+
+    case get_board_by_slug(slug) do
+      nil -> slug
+      _board -> generate_unique_slug()
+    end
   end
 end
