@@ -101,7 +101,6 @@ function createSvgPath(svg, strokeId, x, y, color, width, smoothingEpsilon = 2) 
   path.setAttribute("stroke-width", width)
   path.setAttribute("stroke-linecap", "round")
   path.setAttribute("stroke-linejoin", "round")
-  path.setAttribute("vector-effect", "non-scaling-stroke")
 
   path._rawPoints = [{ x, y }]
   path._renderQueued = false

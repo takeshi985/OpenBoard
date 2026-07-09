@@ -212,3 +212,8 @@
 #shape-preview-layer polygon {
   vector-effect: non-scaling-stroke;
 }
+
+/* Freehand drawing should scale with the board zoom, like ink on paper. */
+#drawing-layer path {
+  vector-effect: none;
+}
