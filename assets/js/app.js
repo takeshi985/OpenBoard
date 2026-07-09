@@ -8,6 +8,85 @@ import topbar from "../vendor/topbar"
 
 const Hooks = {}
 
+function getOrCreateGuestSession() {
+  const idKey = "open_board_guest_id"
+  const nameKey = "open_board_guest_name"
+  const colorKey = "open_board_guest_color"
+
+  let id = sessionStorage.getItem(idKey)
+  let name = sessionStorage.getItem(nameKey)
+  let color = sessionStorage.getItem(colorKey)
+
+  const colors = [
+    "#f97316",
+    "#22c55e",
+    "#38bdf8",
+    "#a855f7",
+    "#ec4899",
+    "#eab308",
+    "#14b8a6"
+  ]
+
+  if (!id) {
+    if (window.crypto && window.crypto.randomUUID) {
+      id = `guest-${window.crypto.randomUUID()}`
+    } else {
+      id = `guest-${Date.now()}-${Math.floor(Math.random() * 100000)}`
+    }
+
+    sessionStorage.setItem(idKey, id)
+  }
+
+  if (!name) {
+    name = `Guest ${Math.floor(Math.random() * 900) + 100}`
+    sessionStorage.setItem(nameKey, name)
+  }
+
+  if (!color) {
+    color = colors[Math.floor(Math.random() * colors.length)]
+    sessionStorage.setItem(colorKey, color)
+  }
+
+  return { id, name, color }
+}
+
+Hooks.BoardCursor = {
+  mounted() {
+    this.lastSentAt = 0
+
+    this.onPointerMove = (event) => {
+      const now = Date.now()
+
+      if (now - this.lastSentAt < 50) {
+        return
+      }
+
+      this.lastSentAt = now
+
+      const rect = this.el.getBoundingClientRect()
+      const x = Math.round(event.clientX - rect.left)
+      const y = Math.round(event.clientY - rect.top)
+
+      if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+        return
+      }
+
+      this.pushEvent("cursor_move", {
+        x: x,
+        y: y
+      })
+    }
+
+    this.el.addEventListener("pointermove", this.onPointerMove)
+  },
+
+  destroyed() {
+    if (this.onPointerMove) {
+      this.el.removeEventListener("pointermove", this.onPointerMove)
+    }
+  }
+}
+
 Hooks.DraggableBoardObject = {
   mounted() {
     this.handle = this.el.querySelector("[data-drag-handle]")
@@ -112,8 +191,15 @@ const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   hooks: Hooks,
-  params: {
-    _csrf_token: csrfToken
+  params: () => {
+    const guest = getOrCreateGuestSession()
+
+    return {
+      _csrf_token: csrfToken,
+      guest_id: guest.id,
+      guest_name: guest.name,
+      guest_color: guest.color
+    }
   }
 })
 
