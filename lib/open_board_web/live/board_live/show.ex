@@ -55,9 +55,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
   end
 
   @impl true
-  def handle_event("select_color", _params, socket) do
-    {:noreply, socket}
-  end
+  def handle_event("select_color", _params, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("create_object", %{"kind" => kind}, socket) do
@@ -123,6 +121,25 @@ defmodule OpenBoardWeb.BoardLive.Show do
         Boards.update_board_object(object, %{
           x: x,
           y: y
+        })
+
+      broadcast_board_objects_changed(socket)
+
+      {:noreply, reload_board_objects(socket)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("resize_object", %{"id" => id, "width" => width, "height" => height}, socket) do
+    object = Boards.get_board_object!(id)
+
+    if object.board_id == socket.assigns.board.id do
+      {:ok, _object} =
+        Boards.update_board_object(object, %{
+          width: width,
+          height: height
         })
 
       broadcast_board_objects_changed(socket)
@@ -203,10 +220,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
       <header class="flex h-16 items-center justify-between border-b border-slate-800 bg-slate-900 px-6">
         <div>
           <div class="text-lg font-semibold tracking-tight">OpenBoard</div>
-          
           <div class="text-xs text-slate-400">Interactive board prototype</div>
         </div>
-        
+
         <div class="flex items-center gap-3">
           <.link
             navigate={~p"/boards"}
@@ -214,27 +230,25 @@ defmodule OpenBoardWeb.BoardLive.Show do
           >
             Boards
           </.link>
-          
+
           <div class="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300">
             {Enum.count(@online_users)} online
           </div>
         </div>
       </header>
-      
+
       <main class="flex h-[calc(100vh-4rem)]">
         <aside class="w-72 overflow-y-auto border-r border-slate-800 bg-slate-900/80 p-5">
           <div class="mb-6">
             <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Board</div>
-            
             <div class="mt-2 text-xl font-semibold">{@board.title}</div>
-            
             <div class="mt-1 text-sm text-slate-400">/boards/{@board.slug}</div>
           </div>
-          
+
           <div class="space-y-3">
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="text-sm font-semibold">Tools</div>
-              
+
               <div class="mt-3 grid grid-cols-2 gap-2">
                 <button
                   type="button"
@@ -244,7 +258,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 >
                   Sticky
                 </button>
-                
+
                 <button
                   type="button"
                   phx-click="create_object"
@@ -253,7 +267,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 >
                   Text
                 </button>
-                
+
                 <button
                   type="button"
                   phx-click="create_object"
@@ -262,7 +276,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 >
                   Rectangle
                 </button>
-                
+
                 <button
                   type="button"
                   phx-click="create_object"
@@ -273,14 +287,13 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 </button>
               </div>
             </div>
-            
+
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="flex items-center justify-between">
                 <div class="text-sm font-semibold">Color</div>
-                
                 <div class="text-xs text-slate-500">{@selected_color}</div>
               </div>
-              
+
               <div class="mt-3 grid grid-cols-6 gap-2">
                 <%= for color <- @available_colors do %>
                   <button
@@ -297,38 +310,36 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 <% end %>
               </div>
             </div>
-            
+
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="text-sm font-semibold">You</div>
-              
+
               <div class="mt-3 flex items-center gap-3">
                 <div
                   class="h-3 w-3 rounded-full"
                   style={"background-color: #{@current_user.color};"}
                 >
                 </div>
-                
+
                 <div>
                   <div class="text-sm font-semibold">{@current_user.name}</div>
-                  
                   <div class="text-xs text-slate-500">{short_guest_id(@current_user.id)}</div>
                 </div>
               </div>
             </div>
-            
+
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="flex items-center justify-between">
                 <div class="text-sm font-semibold">Online users</div>
-                
                 <div class="text-xs text-slate-500">{Enum.count(@online_users)}</div>
               </div>
-              
+
               <div class="mt-3 space-y-3">
                 <%= for user <- @online_users do %>
                   <div class="flex items-center gap-3">
                     <div class="h-3 w-3 rounded-full" style={"background-color: #{user.color};"}>
                     </div>
-                    
+
                     <div class="min-w-0">
                       <div class="truncate text-sm font-medium">
                         {user.name}
@@ -341,26 +352,24 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 <% end %>
               </div>
             </div>
-            
+
             <div class="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div class="text-sm font-semibold">Objects</div>
-              
               <div class="mt-1 text-2xl font-bold">{Enum.count(@board_objects)}</div>
             </div>
           </div>
         </aside>
-        
+
         <section class="relative flex-1 overflow-hidden bg-slate-950">
           <div class="absolute inset-0 opacity-40 board-grid"></div>
-          
+
           <div class="absolute left-6 top-6 z-10 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl">
             <div class="text-sm font-semibold">Canvas</div>
-            
             <div class="text-xs text-slate-400">
-              Tools: sticky notes, text blocks, rectangles and circles.
+              Objects can be dragged and resized. Use the bottom-right handle.
             </div>
           </div>
-          
+
           <div
             id="board-canvas"
             phx-hook="BoardCursor"
@@ -376,7 +385,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   style={"border-top-color: #{cursor.color}; transform: rotate(-35deg);"}
                 >
                 </div>
-                
+
                 <div
                   class="mt-1 rounded-md px-2 py-1 text-xs font-semibold text-white shadow"
                   style={"background-color: #{cursor.color};"}
@@ -385,14 +394,15 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 </div>
               </div>
             <% end %>
-            
+
             <%= for object <- @board_objects do %>
               <div
                 id={"board-object-#{object.id}"}
                 phx-hook="DraggableBoardObject"
                 data-object-id={object.id}
+                data-object-kind={object.kind}
                 class={[
-                  "absolute border p-3 shadow-xl",
+                  "absolute relative border p-3 shadow-xl",
                   "select-none transition hover:scale-[1.01]",
                   object_container_class(object)
                 ]}
@@ -408,7 +418,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   <div class="text-xs font-bold uppercase tracking-wide opacity-70">
                     {object_title(object.kind)}
                   </div>
-                  
+
                   <button
                     type="button"
                     phx-click="delete_object"
@@ -418,7 +428,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     ×
                   </button>
                 </div>
-                
+
                 <%= if object.kind in ["sticky", "text", "rectangle", "circle"] do %>
                   <textarea
                     phx-blur="update_text"
@@ -429,6 +439,13 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     ]}
                   ><%= object.text %></textarea>
                 <% end %>
+
+                <div
+                  data-resize-handle
+                  class="absolute bottom-1 right-1 z-20 h-4 w-4 cursor-se-resize rounded-sm border border-slate-600 bg-white/70 shadow hover:bg-orange-300"
+                  title="Resize object"
+                >
+                </div>
               </div>
             <% end %>
           </div>

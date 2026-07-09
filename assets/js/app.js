@@ -90,24 +90,29 @@ Hooks.BoardCursor = {
 Hooks.DraggableBoardObject = {
   mounted() {
     this.handle = this.el.querySelector("[data-drag-handle]")
+    this.resizeHandle = this.el.querySelector("[data-resize-handle]")
     this.canvas = document.getElementById("board-canvas")
 
-    if (!this.handle || !this.canvas) {
+    if (!this.canvas) {
       return
     }
 
     this.isDragging = false
+    this.isResizing = false
+
     this.startPointerX = 0
     this.startPointerY = 0
     this.startObjectX = 0
     this.startObjectY = 0
+    this.startWidth = 0
+    this.startHeight = 0
 
     this.onPointerDown = (event) => {
-      if (event.button !== 0) {
+      if (event.button !== 0 || this.isResizing) {
         return
       }
 
-      if (event.target.closest("button")) {
+      if (event.target.closest("button") || event.target.closest("[data-resize-handle]")) {
         return
       }
 
@@ -168,12 +173,90 @@ Hooks.DraggableBoardObject = {
       })
     }
 
-    this.handle.addEventListener("pointerdown", this.onPointerDown)
+    this.onResizePointerDown = (event) => {
+      if (event.button !== 0 || this.isDragging) {
+        return
+      }
+
+      event.preventDefault()
+      event.stopPropagation()
+
+      const objectRect = this.el.getBoundingClientRect()
+
+      this.isResizing = true
+      this.startPointerX = event.clientX
+      this.startPointerY = event.clientY
+      this.startWidth = objectRect.width
+      this.startHeight = objectRect.height
+
+      this.el.style.transition = "none"
+      this.el.style.zIndex = "999"
+      this.el.classList.add("ring-2", "ring-sky-400")
+
+      document.addEventListener("pointermove", this.onResizePointerMove)
+      document.addEventListener("pointerup", this.onResizePointerUp)
+    }
+
+    this.onResizePointerMove = (event) => {
+      if (!this.isResizing) {
+        return
+      }
+
+      const deltaX = event.clientX - this.startPointerX
+      const deltaY = event.clientY - this.startPointerY
+
+      let nextWidth = Math.max(110, Math.round(this.startWidth + deltaX))
+      let nextHeight = Math.max(80, Math.round(this.startHeight + deltaY))
+
+      if (this.el.dataset.objectKind === "circle") {
+        const size = Math.max(90, nextWidth, nextHeight)
+        nextWidth = size
+        nextHeight = size
+      }
+
+      this.el.style.width = `${nextWidth}px`
+      this.el.style.height = `${nextHeight}px`
+    }
+
+    this.onResizePointerUp = () => {
+      if (!this.isResizing) {
+        return
+      }
+
+      this.isResizing = false
+
+      document.removeEventListener("pointermove", this.onResizePointerMove)
+      document.removeEventListener("pointerup", this.onResizePointerUp)
+
+      this.el.classList.remove("ring-2", "ring-sky-400")
+      this.el.style.transition = ""
+
+      const width = parseFloat(this.el.style.width || "0")
+      const height = parseFloat(this.el.style.height || "0")
+
+      this.pushEvent("resize_object", {
+        id: this.el.dataset.objectId,
+        width: width,
+        height: height
+      })
+    }
+
+    if (this.handle) {
+      this.handle.addEventListener("pointerdown", this.onPointerDown)
+    }
+
+    if (this.resizeHandle) {
+      this.resizeHandle.addEventListener("pointerdown", this.onResizePointerDown)
+    }
   },
 
   destroyed() {
     if (this.handle && this.onPointerDown) {
       this.handle.removeEventListener("pointerdown", this.onPointerDown)
+    }
+
+    if (this.resizeHandle && this.onResizePointerDown) {
+      this.resizeHandle.removeEventListener("pointerdown", this.onResizePointerDown)
     }
 
     if (this.onPointerMove) {
@@ -182,6 +265,14 @@ Hooks.DraggableBoardObject = {
 
     if (this.onPointerUp) {
       document.removeEventListener("pointerup", this.onPointerUp)
+    }
+
+    if (this.onResizePointerMove) {
+      document.removeEventListener("pointermove", this.onResizePointerMove)
+    }
+
+    if (this.onResizePointerUp) {
+      document.removeEventListener("pointerup", this.onResizePointerUp)
     }
   }
 }
