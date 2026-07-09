@@ -18,6 +18,7 @@ const MIN_DRAW_POINT_DISTANCE = 0.5
 const STAIR_SMOOTHING_SCREEN_EPSILON = 1.8
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 2.5
+const MARQUEE_MIN_SIZE = 4
 
 const SHAPE_TOOLS = new Set([
   "line",
@@ -481,7 +482,8 @@ Hooks.BoardSurface = {
 
     this.remoteCursors = new Map()
     this.remoteStrokes = new Map()
-    this.selectedObjectId = null
+    this.selectedObjectIds = new Set()
+    this.selectionBox = document.getElementById("selection-box")
 
     this.lastCursorSentAt = 0
     this.lastDrawSentAt = 0
@@ -491,6 +493,7 @@ Hooks.BoardSurface = {
     this.isErasing = false
     this.isPanning = false
     this.isShapeDrawing = false
+    this.isMarqueeSelecting = false
 
     this.currentStrokeId = null
     this.currentLocalPath = null
@@ -498,6 +501,10 @@ Hooks.BoardSurface = {
     this.currentShapeStartPoint = null
     this.currentShapeEndPoint = null
     this.currentShapePreview = null
+    this.marqueeStartBoardPoint = null
+    this.marqueeCurrentBoardPoint = null
+    this.marqueeStartScreenPoint = null
+    this.marqueeCurrentScreenPoint = null
 
     this.startPointerX = 0
     this.startPointerY = 0
@@ -525,14 +532,20 @@ Hooks.BoardSurface = {
         return
       }
 
-      if ((event.key === "Delete" || event.key === "Backspace") && this.selectedObjectId) {
+      if (event.ctrlKey && event.key.toLowerCase() === "a") {
+        event.preventDefault()
+        this.selectAllObjects()
+        return
+      }
+
+      if ((event.key === "Delete" || event.key === "Backspace") && this.selectedObjectIds.size > 0) {
         event.preventDefault()
 
-        this.pushEvent("delete_object", {
-          id: this.selectedObjectId
+        this.pushEvent("delete_objects", {
+          ids: Array.from(this.selectedObjectIds)
         })
 
-        this.selectedObjectId = null
+        this.selectedObjectIds.clear()
         this.clearSelectionOutline()
       }
     }
@@ -552,35 +565,54 @@ Hooks.BoardSurface = {
     this.onPointerDown = (event) => {
       this.updateDatasetState()
 
-      if (event.button === 2) {
+      const isPrimaryButton = event.button === 0
+      const isMiddleButton = event.button === 1
+      const isRightButton = event.button === 2
+      const isBoardObject = event.target.closest("[data-board-object]")
+
+      if (isMiddleButton || isRightButton) {
         this.startPanning(event)
         return
       }
 
-      if (event.button !== 0) {
+      if (!isPrimaryButton) {
         return
       }
 
-      if (event.target.closest("[data-board-object]")) {
+      if (this.selectedTool === "cursor") {
+        if (isBoardObject) {
+          return
+        }
+
+        this.startMarqueeSelection(event)
         return
       }
 
-      this.selectedObjectId = null
-      this.clearSelectionOutline()
+      if (isBoardObject) {
+        this.startPanning(event)
+        return
+      }
 
       if (this.selectedTool === "draw") {
+        this.clearSelectedObjects()
         this.startDrawing(event)
         return
       }
 
       if (this.selectedTool === "eraser") {
+        this.clearSelectedObjects()
         this.startErasing(event)
         return
       }
 
       if (SHAPE_TOOLS.has(this.selectedTool)) {
+        this.clearSelectedObjects()
         this.startShapeDrawing(event)
+        return
       }
+
+      this.clearSelectedObjects()
+      this.startPanning(event)
     }
 
     this.onDocumentPointerMove = (event) => {
@@ -599,6 +631,10 @@ Hooks.BoardSurface = {
       if (this.isShapeDrawing) {
         this.updateShapeDrawing(event)
       }
+
+      if (this.isMarqueeSelecting) {
+        this.updateMarqueeSelection(event)
+      }
     }
 
     this.onDocumentPointerUp = () => {
@@ -616,6 +652,10 @@ Hooks.BoardSurface = {
 
       if (this.isShapeDrawing) {
         this.finishShapeDrawing()
+      }
+
+      if (this.isMarqueeSelecting) {
+        this.finishMarqueeSelection()
       }
     }
 
@@ -714,17 +754,19 @@ Hooks.BoardSurface = {
   },
 
   updateDatasetState() {
-    this.selectedTool = this.el.dataset.selectedTool || "select"
+    this.selectedTool = this.el.dataset.selectedTool || "pan"
     this.selectedColor = this.el.dataset.selectedColor || "#fde047"
 
-    if (this.selectedTool === "draw") {
+    if (this.selectedTool === "cursor") {
+      this.el.style.cursor = "default"
+    } else if (this.selectedTool === "draw") {
       this.el.style.cursor = "crosshair"
     } else if (this.selectedTool === "eraser") {
       this.el.style.cursor = "cell"
     } else if (SHAPE_TOOLS.has(this.selectedTool)) {
       this.el.style.cursor = "crosshair"
     } else {
-      this.el.style.cursor = "default"
+      this.el.style.cursor = "grab"
     }
   },
 
@@ -742,6 +784,7 @@ Hooks.BoardSurface = {
     this.cursorLayer = document.getElementById("remote-cursor-layer")
     this.drawingLayer = document.getElementById("drawing-layer")
     this.shapePreviewLayer = document.getElementById("shape-preview-layer")
+    this.selectionBox = document.getElementById("selection-box")
   },
 
   applyCamera() {
@@ -912,13 +955,46 @@ Hooks.BoardSurface = {
     document.removeEventListener("pointerup", this.onDocumentPointerUp)
   },
 
-  selectObject(objectId, element) {
-    this.selectedObjectId = objectId
-    this.clearSelectionOutline()
+  selectObject(objectId, element, additive = false) {
+    if (!additive) {
+      this.selectedObjectIds.clear()
+      this.clearSelectionOutline()
+    }
+
+    if (this.selectedObjectIds.has(objectId) && additive) {
+      this.selectedObjectIds.delete(objectId)
+
+      if (element) {
+        element.classList.remove("ring-2", "ring-blue-500")
+      }
+
+      return
+    }
+
+    this.selectedObjectIds.add(objectId)
 
     if (element) {
       element.classList.add("ring-2", "ring-blue-500")
     }
+  },
+
+  selectObjects(objectIds) {
+    this.selectedObjectIds = new Set(objectIds)
+    this.clearSelectionOutline()
+    this.reapplySelectionOutline()
+  },
+
+  selectAllObjects() {
+    const objectIds = Array.from(document.querySelectorAll("[data-board-object]"))
+      .map((element) => element.dataset.objectId)
+      .filter(Boolean)
+
+    this.selectObjects(objectIds)
+  },
+
+  clearSelectedObjects() {
+    this.selectedObjectIds.clear()
+    this.clearSelectionOutline()
   },
 
   clearSelectionOutline() {
@@ -928,15 +1004,134 @@ Hooks.BoardSurface = {
   },
 
   reapplySelectionOutline() {
-    if (!this.selectedObjectId) {
+    if (!this.selectedObjectIds || this.selectedObjectIds.size === 0) {
       return
     }
 
-    const element = document.getElementById(`board-object-${this.selectedObjectId}`)
+    for (const objectId of this.selectedObjectIds) {
+      const element = document.getElementById(`board-object-${objectId}`)
 
-    if (element) {
-      element.classList.add("ring-2", "ring-blue-500")
+      if (element) {
+        element.classList.add("ring-2", "ring-blue-500")
+      }
     }
+  },
+
+  startMarqueeSelection(event) {
+    event.preventDefault()
+
+    this.isMarqueeSelecting = true
+    this.marqueeStartBoardPoint = this.screenToBoardPoint(event)
+    this.marqueeCurrentBoardPoint = this.marqueeStartBoardPoint
+
+    const rect = this.el.getBoundingClientRect()
+    this.marqueeStartScreenPoint = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top
+    }
+    this.marqueeCurrentScreenPoint = this.marqueeStartScreenPoint
+
+    if (this.selectionBox) {
+      this.selectionBox.style.display = "block"
+      this.updateSelectionBoxElement()
+    }
+
+    document.addEventListener("pointermove", this.onDocumentPointerMove)
+    document.addEventListener("pointerup", this.onDocumentPointerUp)
+  },
+
+  updateMarqueeSelection(event) {
+    this.marqueeCurrentBoardPoint = this.screenToBoardPoint(event)
+
+    const rect = this.el.getBoundingClientRect()
+    this.marqueeCurrentScreenPoint = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top
+    }
+
+    this.updateSelectionBoxElement()
+  },
+
+  updateSelectionBoxElement() {
+    if (!this.selectionBox || !this.marqueeStartScreenPoint || !this.marqueeCurrentScreenPoint) {
+      return
+    }
+
+    const left = Math.min(this.marqueeStartScreenPoint.x, this.marqueeCurrentScreenPoint.x)
+    const top = Math.min(this.marqueeStartScreenPoint.y, this.marqueeCurrentScreenPoint.y)
+    const width = Math.abs(this.marqueeCurrentScreenPoint.x - this.marqueeStartScreenPoint.x)
+    const height = Math.abs(this.marqueeCurrentScreenPoint.y - this.marqueeStartScreenPoint.y)
+
+    this.selectionBox.style.left = `${left}px`
+    this.selectionBox.style.top = `${top}px`
+    this.selectionBox.style.width = `${width}px`
+    this.selectionBox.style.height = `${height}px`
+  },
+
+  finishMarqueeSelection() {
+    this.isMarqueeSelecting = false
+
+    document.removeEventListener("pointermove", this.onDocumentPointerMove)
+    document.removeEventListener("pointerup", this.onDocumentPointerUp)
+
+    if (this.selectionBox) {
+      this.selectionBox.style.display = "none"
+    }
+
+    const start = this.marqueeStartBoardPoint
+    const end = this.marqueeCurrentBoardPoint || start
+
+    this.marqueeStartBoardPoint = null
+    this.marqueeCurrentBoardPoint = null
+    this.marqueeStartScreenPoint = null
+    this.marqueeCurrentScreenPoint = null
+
+    if (!start || !end) {
+      return
+    }
+
+    const rect = {
+      left: Math.min(start.x, end.x),
+      top: Math.min(start.y, end.y),
+      right: Math.max(start.x, end.x),
+      bottom: Math.max(start.y, end.y)
+    }
+
+    const width = Math.abs(end.x - start.x)
+    const height = Math.abs(end.y - start.y)
+
+    if (width < MARQUEE_MIN_SIZE && height < MARQUEE_MIN_SIZE) {
+      this.clearSelectedObjects()
+      return
+    }
+
+    const selectedIds = Array.from(document.querySelectorAll("[data-board-object]"))
+      .filter((element) => this.objectIntersectsRect(element, rect))
+      .map((element) => element.dataset.objectId)
+      .filter(Boolean)
+
+    this.selectObjects(selectedIds)
+  },
+
+  objectIntersectsRect(element, rect) {
+    const left = parseFloat(element.style.left || "0")
+    const top = parseFloat(element.style.top || "0")
+    const width = parseFloat(element.style.width || "0")
+    const height = parseFloat(element.style.height || "0")
+
+    const objectRect = {
+      left: left,
+      top: top,
+      right: left + width,
+      bottom: top + height
+    }
+
+    return !(
+      objectRect.right < rect.left ||
+      objectRect.left > rect.right ||
+      objectRect.bottom < rect.top ||
+      objectRect.top > rect.bottom
+    )
   },
 
   reconnectRemoteCursorElements() {
@@ -1291,7 +1486,7 @@ Hooks.BoardObjectWindow = {
         return
       }
 
-      if ((this.canvas.dataset.selectedTool || "select") !== "select") {
+      if ((this.canvas.dataset.selectedTool || "pan") !== "cursor") {
         this.el.style.cursor = "auto"
         return
       }
@@ -1308,7 +1503,7 @@ Hooks.BoardObjectWindow = {
     this.onPointerDown = (event) => {
       const surface = window.OpenBoardSurface
 
-      if (!surface || (this.canvas.dataset.selectedTool || "select") !== "select") {
+      if (!surface || (this.canvas.dataset.selectedTool || "pan") !== "cursor") {
         return
       }
 
@@ -1316,7 +1511,7 @@ Hooks.BoardObjectWindow = {
         return
       }
 
-      if (event.target.closest("button")) {
+      if (event.target.closest("button") || event.target.closest("textarea")) {
         return
       }
 
@@ -1337,7 +1532,7 @@ Hooks.BoardObjectWindow = {
 
       event.preventDefault()
 
-      surface.selectObject(this.el.dataset.objectId, this.el)
+      surface.selectObject(this.el.dataset.objectId, this.el, event.shiftKey)
 
       this.el.style.transition = "none"
 

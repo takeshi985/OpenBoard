@@ -217,3 +217,12 @@
 #drawing-layer path {
   vector-effect: none;
 }
+/* Toolbar and marquee selection */
+
+#selection-box {
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.16);
+}
+
+[data-board-object].ring-2 {
+  outline: none;
+}

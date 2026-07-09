@@ -7,10 +7,27 @@ defmodule OpenBoardWeb.BoardLive.Show do
   @workspace_width 6000
   @workspace_height 4000
 
-  @colors ["yellow", "blue", "green", "pink", "purple", "white"]
+  @colors [
+    "yellow",
+    "amber",
+    "orange",
+    "red",
+    "pink",
+    "fuchsia",
+    "blue",
+    "purple",
+    "cyan",
+    "indigo",
+    "teal",
+    "green",
+    "lime",
+    "white",
+    "black"
+  ]
 
   @tools [
-    "select",
+    "pan",
+    "cursor",
     "sticky",
     "text",
     "line",
@@ -61,13 +78,25 @@ defmodule OpenBoardWeb.BoardLive.Show do
           |> assign(:board_objects, board_objects)
           |> assign(:online_users, list_online_users(topic))
           |> assign(:selected_color, "yellow")
-          |> assign(:selected_tool, "select")
+          |> assign(:selected_tool, "pan")
           |> assign(:available_colors, @colors)
           |> assign(:workspace_width, @workspace_width)
           |> assign(:workspace_height, @workspace_height)
 
         {:ok, socket}
     end
+  end
+
+  @impl true
+  def handle_event("select_tool", %{"tool" => "cursor"}, socket) do
+    next_tool =
+      if socket.assigns.selected_tool == "cursor" do
+        "pan"
+      else
+        "cursor"
+      end
+
+    {:noreply, assign(socket, :selected_tool, next_tool)}
   end
 
   @impl true
@@ -85,6 +114,48 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   @impl true
   def handle_event("select_color", _params, socket), do: {:noreply, socket}
+
+  @impl true
+  def handle_event("create_sticky", %{"color" => color}, socket) when color in @colors do
+    board = socket.assigns.board
+    count = Enum.count(socket.assigns.board_objects)
+
+    attrs = %{
+      board_id: board.id,
+      kind: "sticky",
+      text: "New sticky note",
+      color: color,
+      x: @workspace_width / 2 + count * 28,
+      y: @workspace_height / 2 + count * 24,
+      width: 240.0,
+      height: 150.0,
+      z_index: Boards.next_regular_z_index(board.id),
+      is_pinned: false,
+      rotation: 0.0,
+      stroke_color: "#0f172a",
+      fill_color: "transparent",
+      stroke_width: 2
+    }
+
+    case Boards.create_board_object(attrs) do
+      {:ok, _object} ->
+        broadcast_board_objects_changed(socket)
+
+        socket =
+          socket
+          |> assign(:selected_color, color)
+          |> assign(:selected_tool, "pan")
+          |> reload_board_objects()
+
+        {:noreply, socket}
+
+      {:error, _changeset} ->
+        {:noreply, put_flash(socket, :error, "Could not create sticky note")}
+    end
+  end
+
+  @impl true
+  def handle_event("create_sticky", _params, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("create_object", %{"kind" => kind}, socket) do
@@ -165,6 +236,27 @@ defmodule OpenBoardWeb.BoardLive.Show do
       {:noreply, socket}
     end
   end
+
+  @impl true
+  def handle_event("delete_objects", %{"ids" => ids}, socket) when is_list(ids) do
+    ids
+    |> Enum.uniq()
+    |> Enum.each(fn id ->
+      case safe_get_board_object(id) do
+        {:ok, object} when object.board_id == socket.assigns.board.id ->
+          Boards.delete_board_object(object)
+
+        _other ->
+          :ok
+      end
+    end)
+
+    broadcast_board_objects_changed(socket)
+    {:noreply, reload_board_objects(socket)}
+  end
+
+  @impl true
+  def handle_event("delete_objects", _params, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("update_text", %{"id" => id, "value" => text}, socket) do
@@ -432,7 +524,6 @@ defmodule OpenBoardWeb.BoardLive.Show do
       <header class="flex h-16 items-center justify-between border-b border-slate-200 bg-white/90 px-6 shadow-sm backdrop-blur">
         <div>
           <div class="text-lg font-bold tracking-tight text-slate-950">OpenBoard</div>
-
           <div class="text-xs text-slate-500">Collaborative whiteboard</div>
         </div>
 
@@ -450,201 +541,10 @@ defmodule OpenBoardWeb.BoardLive.Show do
         </div>
       </header>
 
-      <main class="flex h-[calc(100vh-4rem)]">
-        <aside class="z-20 w-80 overflow-y-auto border-r border-slate-200 bg-white/95 p-5 shadow-sm">
-          <div class="mb-6">
-            <div class="text-xs font-bold uppercase tracking-wide text-slate-400">Board</div>
-
-            <div class="mt-2 text-xl font-bold text-slate-950">{@board.title}</div>
-
-            <div class="mt-1 text-sm text-slate-500">/boards/{@board.slug}</div>
-          </div>
-
-          <div class="space-y-4">
-            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div class="text-sm font-bold text-slate-800">Mode</div>
-
-              <div class="mt-3 grid grid-cols-3 gap-2">
-                <button
-                  type="button"
-                  phx-click="select_tool"
-                  phx-value-tool="select"
-                  class={tool_button_class(@selected_tool == "select")}
-                >
-                  Select
-                </button>
-
-                <button
-                  type="button"
-                  phx-click="select_tool"
-                  phx-value-tool="draw"
-                  class={tool_button_class(@selected_tool == "draw")}
-                >
-                  Draw
-                </button>
-
-                <button
-                  type="button"
-                  phx-click="select_tool"
-                  phx-value-tool="eraser"
-                  class={tool_button_class(@selected_tool == "eraser")}
-                >
-                  Erase
-                </button>
-              </div>
-
-              <div class="mt-3 rounded-xl border border-slate-200 bg-white p-3 text-xs leading-relaxed text-slate-500">
-                ПКМ + drag: двигать поле. Wheel: плавный zoom к курсору.
-              </div>
-            </div>
-
-            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div class="text-sm font-bold text-slate-800">Quick objects</div>
-
-              <div class="mt-3 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  phx-click="create_object"
-                  phx-value-kind="sticky"
-                  class="rounded-xl bg-amber-400 px-3 py-2 text-sm font-bold text-amber-950 shadow-sm hover:bg-amber-300"
-                >
-                  Sticky
-                </button>
-
-                <button
-                  type="button"
-                  phx-click="create_object"
-                  phx-value-kind="text"
-                  class="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 shadow-sm hover:bg-slate-50"
-                >
-                  Text
-                </button>
-              </div>
-            </div>
-
-            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div class="text-sm font-bold text-slate-800">Shape tools</div>
-
-              <div class="mt-3 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  phx-click="select_tool"
-                  phx-value-tool="line"
-                  class={tool_button_class(@selected_tool == "line")}
-                >Line</button>
-                <button
-                  type="button"
-                  phx-click="select_tool"
-                  phx-value-tool="arrow"
-                  class={tool_button_class(@selected_tool == "arrow")}
-                >Arrow</button>
-                <button
-                  type="button"
-                  phx-click="select_tool"
-                  phx-value-tool="rectangle"
-                  class={tool_button_class(@selected_tool == "rectangle")}
-                >Rectangle</button>
-                <button
-                  type="button"
-                  phx-click="select_tool"
-                  phx-value-tool="rounded_rectangle"
-                  class={tool_button_class(@selected_tool == "rounded_rectangle")}
-                >Rounded</button>
-                <button
-                  type="button"
-                  phx-click="select_tool"
-                  phx-value-tool="ellipse"
-                  class={tool_button_class(@selected_tool == "ellipse")}
-                >Ellipse</button>
-                <button
-                  type="button"
-                  phx-click="select_tool"
-                  phx-value-tool="triangle"
-                  class={tool_button_class(@selected_tool == "triangle")}
-                >Triangle</button>
-              </div>
-
-              <div class="mt-3 rounded-xl border border-slate-200 bg-white p-3 text-xs leading-relaxed text-slate-500">
-                Выбери фигуру и протяни ЛКМ по полю.
-              </div>
-            </div>
-
-            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div class="flex items-center justify-between">
-                <div class="text-sm font-bold text-slate-800">Color</div>
-
-                <div class="text-xs font-medium text-slate-500">{@selected_color}</div>
-              </div>
-
-              <div class="mt-3 grid grid-cols-6 gap-2">
-                <%= for color <- @available_colors do %>
-                  <button
-                    type="button"
-                    phx-click="select_color"
-                    phx-value-color={color}
-                    class={[
-                      "h-8 w-8 rounded-full border-2 shadow-sm transition hover:scale-110",
-                      if(color == @selected_color, do: "border-slate-950", else: "border-slate-300"),
-                      color_dot_class(color)
-                    ]}
-                    title={color}
-                  ></button>
-                <% end %>
-              </div>
-            </div>
-
-            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div class="text-sm font-bold text-slate-800">You</div>
-
-              <div class="mt-3 flex items-center gap-3">
-                <div class="h-3 w-3 rounded-full" style={"background-color: #{@current_user.color};"}>
-                </div>
-
-                <div>
-                  <div class="text-sm font-bold text-slate-800">{@current_user.name}</div>
-
-                  <div class="text-xs text-slate-500">{short_guest_id(@current_user.id)}</div>
-                </div>
-              </div>
-            </div>
-
-            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div class="flex items-center justify-between">
-                <div class="text-sm font-bold text-slate-800">Online users</div>
-
-                <div class="text-xs font-medium text-slate-500">{Enum.count(@online_users)}</div>
-              </div>
-
-              <div class="mt-3 space-y-3">
-                <%= for user <- @online_users do %>
-                  <div class="flex items-center gap-3">
-                    <div class="h-3 w-3 rounded-full" style={"background-color: #{user.color};"}>
-                    </div>
-
-                    <div class="min-w-0">
-                      <div class="truncate text-sm font-semibold text-slate-700">
-                        {user.name}
-                        <%= if user.id == @current_user.id do %>
-                          <span class="text-xs text-slate-400">(you)</span>
-                        <% end %>
-                      </div>
-                    </div>
-                  </div>
-                <% end %>
-              </div>
-            </div>
-
-            <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div class="text-sm font-bold text-slate-800">Board objects</div>
-
-              <div class="mt-1 text-3xl font-black text-slate-950">{Enum.count(@board_objects)}</div>
-            </div>
-          </div>
-        </aside>
-
+      <main class="relative h-[calc(100vh-4rem)]">
         <section
           id="board-viewport"
-          class="whiteboard-viewport relative flex-1 overflow-hidden bg-[#ebe7dc]"
+          class="whiteboard-viewport relative h-full overflow-hidden bg-[#ebe7dc]"
         >
           <div
             id="board-canvas"
@@ -667,17 +567,177 @@ defmodule OpenBoardWeb.BoardLive.Show do
               phx-update="ignore"
               class="pointer-events-none absolute inset-0 z-[1] h-full w-full"
             ></svg>
+
             <svg
               id="shape-preview-layer"
               phx-update="ignore"
               class="pointer-events-none absolute inset-0 z-[90000] h-full w-full"
             ></svg>
+
+            <div
+              id="selection-box"
+              phx-update="ignore"
+              class="pointer-events-none absolute z-[95000] hidden border border-blue-500 bg-blue-500/10"
+            >
+            </div>
+
             <div
               id="remote-cursor-layer"
               phx-update="ignore"
               class="pointer-events-none absolute inset-0 z-[100000]"
             >
             </div>
+
+            <div class="absolute left-4 top-5 z-[120000] flex flex-col gap-3">
+              <div class="rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
+                <div class="flex flex-col gap-1">
+                  <button
+                    type="button"
+                    phx-click="select_tool"
+                    phx-value-tool="cursor"
+                    class={toolbar_button_class(@selected_tool == "cursor")}
+                    title="Cursor / selection"
+                  >
+                    ↖
+                  </button>
+
+                  <button
+                    type="button"
+                    phx-click="select_tool"
+                    phx-value-tool="sticky"
+                    class={toolbar_button_class(@selected_tool == "sticky")}
+                    title="Sticky note"
+                  >
+                    ◰
+                  </button>
+
+                  <button
+                    type="button"
+                    phx-click="create_object"
+                    phx-value-kind="text"
+                    class={toolbar_button_class(@selected_tool == "text")}
+                    title="Text"
+                  >
+                    T
+                  </button>
+
+                  <button
+                    type="button"
+                    phx-click="select_tool"
+                    phx-value-tool="rectangle"
+                    class={toolbar_button_class(@selected_tool == "rectangle")}
+                    title="Rectangle"
+                  >
+                    □
+                  </button>
+
+                  <button
+                    type="button"
+                    phx-click="select_tool"
+                    phx-value-tool="rounded_rectangle"
+                    class={toolbar_button_class(@selected_tool == "rounded_rectangle")}
+                    title="Rounded rectangle"
+                  >
+                    ▢
+                  </button>
+
+                  <button
+                    type="button"
+                    phx-click="select_tool"
+                    phx-value-tool="ellipse"
+                    class={toolbar_button_class(@selected_tool == "ellipse")}
+                    title="Circle / ellipse"
+                  >
+                    ○
+                  </button>
+
+                  <button
+                    type="button"
+                    phx-click="select_tool"
+                    phx-value-tool="triangle"
+                    class={toolbar_button_class(@selected_tool == "triangle")}
+                    title="Triangle"
+                  >
+                    △
+                  </button>
+
+                  <button
+                    type="button"
+                    phx-click="select_tool"
+                    phx-value-tool="line"
+                    class={toolbar_button_class(@selected_tool == "line")}
+                    title="Line"
+                  >
+                    ╱
+                  </button>
+
+                  <button
+                    type="button"
+                    phx-click="select_tool"
+                    phx-value-tool="arrow"
+                    class={toolbar_button_class(@selected_tool == "arrow")}
+                    title="Arrow"
+                  >
+                    ↗
+                  </button>
+
+                  <button
+                    type="button"
+                    phx-click="select_tool"
+                    phx-value-tool="draw"
+                    class={toolbar_button_class(@selected_tool == "draw")}
+                    title="Draw"
+                  >
+                    ✎
+                  </button>
+
+                  <button
+                    type="button"
+                    phx-click="select_tool"
+                    phx-value-tool="eraser"
+                    class={toolbar_button_class(@selected_tool == "eraser")}
+                    title="Eraser"
+                  >
+                    ⌫
+                  </button>
+                </div>
+              </div>
+
+              <div class="rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
+                <button
+                  type="button"
+                  phx-click="select_tool"
+                  phx-value-tool="pan"
+                  class={toolbar_button_class(@selected_tool == "pan")}
+                  title="Pan mode"
+                >
+                  ✥
+                </button>
+              </div>
+            </div>
+
+            <%= if @selected_tool == "sticky" do %>
+              <div class="absolute left-20 top-20 z-[120001] w-[154px] rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
+                <div class="grid grid-cols-2 gap-2">
+                  <%= for color <- sticky_palette_colors() do %>
+                    <button
+                      type="button"
+                      phx-click="create_sticky"
+                      phx-value-color={color}
+                      class={[
+                        "h-12 rounded-sm border shadow-sm hover:ring-2 hover:ring-slate-900",
+                        sticky_palette_class(color)
+                      ]}
+                      title={"Create #{color} sticky note"}
+                    ></button>
+                  <% end %>
+                </div>
+
+                <div class="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-center text-xs font-bold text-slate-700">
+                  Sticky color
+                </div>
+              </div>
+            <% end %>
 
             <div
               id="board-world"
@@ -688,7 +748,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 <div class="text-sm font-bold">Canvas</div>
 
                 <div class="text-xs text-slate-500">
-                  Workspace 6000×4000. ПКМ — pan, колесо — zoom к курсору.
+                  Cursor: selection. Other modes: LMB/MMB/RMB drag pans the board unless a drawing tool is active.
                 </div>
               </div>
 
@@ -740,6 +800,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                         </button>
                       </div>
                     </div>
+
                     <textarea
                       phx-blur="update_text"
                       phx-value-id={object.id}
@@ -1041,6 +1102,15 @@ defmodule OpenBoardWeb.BoardLive.Show do
   defp object_color_class("pink"), do: "border-pink-300 bg-pink-200 text-slate-950"
   defp object_color_class("purple"), do: "border-purple-300 bg-purple-200 text-slate-950"
   defp object_color_class("white"), do: "border-slate-300 bg-white text-slate-950"
+  defp object_color_class("amber"), do: "border-amber-300 bg-amber-200 text-slate-950"
+  defp object_color_class("orange"), do: "border-orange-400 bg-orange-300 text-slate-950"
+  defp object_color_class("red"), do: "border-red-400 bg-red-300 text-slate-950"
+  defp object_color_class("fuchsia"), do: "border-fuchsia-400 bg-fuchsia-300 text-slate-950"
+  defp object_color_class("cyan"), do: "border-cyan-400 bg-cyan-300 text-slate-950"
+  defp object_color_class("indigo"), do: "border-indigo-400 bg-indigo-300 text-slate-950"
+  defp object_color_class("teal"), do: "border-teal-400 bg-teal-300 text-slate-950"
+  defp object_color_class("lime"), do: "border-lime-400 bg-lime-300 text-slate-950"
+  defp object_color_class("black"), do: "border-slate-900 bg-slate-950 text-white"
   defp object_color_class(_), do: "border-yellow-300 bg-yellow-200 text-slate-950"
 
   defp color_dot_class("blue"), do: "bg-sky-300"
@@ -1048,6 +1118,15 @@ defmodule OpenBoardWeb.BoardLive.Show do
   defp color_dot_class("pink"), do: "bg-pink-300"
   defp color_dot_class("purple"), do: "bg-purple-300"
   defp color_dot_class("white"), do: "bg-white"
+  defp color_dot_class("amber"), do: "bg-amber-200"
+  defp color_dot_class("orange"), do: "bg-orange-300"
+  defp color_dot_class("red"), do: "bg-red-300"
+  defp color_dot_class("fuchsia"), do: "bg-fuchsia-300"
+  defp color_dot_class("cyan"), do: "bg-cyan-300"
+  defp color_dot_class("indigo"), do: "bg-indigo-300"
+  defp color_dot_class("teal"), do: "bg-teal-300"
+  defp color_dot_class("lime"), do: "bg-lime-300"
+  defp color_dot_class("black"), do: "bg-slate-950"
   defp color_dot_class(_), do: "bg-yellow-300"
 
   defp drawing_color_hex("blue"), do: "#38bdf8"
@@ -1055,7 +1134,55 @@ defmodule OpenBoardWeb.BoardLive.Show do
   defp drawing_color_hex("pink"), do: "#f9a8d4"
   defp drawing_color_hex("purple"), do: "#c084fc"
   defp drawing_color_hex("white"), do: "#ffffff"
+  defp drawing_color_hex("amber"), do: "#fde68a"
+  defp drawing_color_hex("orange"), do: "#fdba74"
+  defp drawing_color_hex("red"), do: "#fca5a5"
+  defp drawing_color_hex("fuchsia"), do: "#f0abfc"
+  defp drawing_color_hex("cyan"), do: "#67e8f9"
+  defp drawing_color_hex("indigo"), do: "#a5b4fc"
+  defp drawing_color_hex("teal"), do: "#5eead4"
+  defp drawing_color_hex("lime"), do: "#bef264"
+  defp drawing_color_hex("black"), do: "#0f172a"
   defp drawing_color_hex(_), do: "#fde047"
+
+  defp toolbar_button_class(true) do
+    "flex h-9 w-9 items-center justify-center rounded-lg bg-slate-900 text-lg font-bold text-white shadow-sm"
+  end
+
+  defp toolbar_button_class(false) do
+    "flex h-9 w-9 items-center justify-center rounded-lg text-lg font-bold text-slate-800 hover:bg-slate-100"
+  end
+
+  defp sticky_palette_colors do
+    [
+      "yellow",
+      "amber",
+      "orange",
+      "red",
+      "pink",
+      "fuchsia",
+      "blue",
+      "purple",
+      "cyan",
+      "indigo",
+      "teal",
+      "green",
+      "lime",
+      "white",
+      "black"
+    ]
+  end
+
+  defp sticky_palette_class("amber"), do: "border-amber-300 bg-amber-200"
+  defp sticky_palette_class("orange"), do: "border-orange-400 bg-orange-300"
+  defp sticky_palette_class("red"), do: "border-red-400 bg-red-300"
+  defp sticky_palette_class("fuchsia"), do: "border-fuchsia-400 bg-fuchsia-300"
+  defp sticky_palette_class("cyan"), do: "border-cyan-400 bg-cyan-300"
+  defp sticky_palette_class("indigo"), do: "border-indigo-400 bg-indigo-300"
+  defp sticky_palette_class("teal"), do: "border-teal-400 bg-teal-300"
+  defp sticky_palette_class("lime"), do: "border-lime-400 bg-lime-300"
+  defp sticky_palette_class("black"), do: "border-slate-900 bg-slate-950"
+  defp sticky_palette_class(color), do: color_dot_class(color)
 
   defp tool_button_class(true) do
     "rounded-xl bg-slate-950 px-3 py-2 text-sm font-bold text-white shadow-sm hover:bg-slate-800"
@@ -1093,6 +1220,12 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   defp line_y(object), do: object.height / 2
   defp line_end_x(object), do: max(object.width, 1)
+
+  defp safe_get_board_object(id) do
+    {:ok, Boards.get_board_object!(id)}
+  rescue
+    Ecto.NoResultsError -> :error
+  end
 
   defp number_param(params, key, fallback) do
     case Map.get(params, key) do
