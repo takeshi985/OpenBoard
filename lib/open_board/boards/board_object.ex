@@ -16,6 +16,7 @@ defmodule OpenBoard.Boards.BoardObject do
     field :height, :float, default: 150.0
     field :color, :string, default: "yellow"
     field :z_index, :integer, default: 0
+    field :is_pinned, :boolean, default: false
 
     belongs_to :board, Board
 
@@ -24,7 +25,18 @@ defmodule OpenBoard.Boards.BoardObject do
 
   def changeset(board_object, attrs) do
     board_object
-    |> cast(attrs, [:board_id, :kind, :text, :x, :y, :width, :height, :color, :z_index])
+    |> cast(attrs, [
+      :board_id,
+      :kind,
+      :text,
+      :x,
+      :y,
+      :width,
+      :height,
+      :color,
+      :z_index,
+      :is_pinned
+    ])
     |> validate_required([:board_id, :kind, :x, :y, :width, :height])
     |> validate_inclusion(:kind, @allowed_kinds)
     |> validate_number(:width, greater_than: 0)
