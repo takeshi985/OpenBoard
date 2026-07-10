@@ -523,8 +523,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
   end
 
   @impl true
-  def handle_event("drawing_end", %{"stroke_id" => stroke_id}, socket) do
+  def handle_event("drawing_end", params, socket) do
     user = socket.assigns.current_user
+    stroke_id = Map.get(params, "stroke_id")
 
     Phoenix.PubSub.broadcast(
       OpenBoard.PubSub,
@@ -536,7 +537,26 @@ defmodule OpenBoardWeb.BoardLive.Show do
        }}
     )
 
-    {:noreply, socket}
+    case freehand_object_attrs(params, socket) do
+      nil ->
+        {:noreply, socket}
+
+      attrs ->
+        case Boards.create_board_object(attrs) do
+          {:ok, object} ->
+            broadcast_board_objects_changed(socket)
+
+            socket =
+              socket
+              |> push_undo({:delete_objects, [object.id]})
+              |> reload_board_objects()
+
+            {:noreply, socket}
+
+          {:error, _changeset} ->
+            {:noreply, socket}
+        end
+    end
   end
 
   @impl true
@@ -953,6 +973,18 @@ defmodule OpenBoardWeb.BoardLive.Show do
           </defs>
         <% end %>
 
+        <%= if @object.kind == "freehand" do %>
+          <path
+            data-freehand-path="true"
+            d={freehand_path_d(@object)}
+            fill="none"
+            stroke={@object.stroke_color}
+            stroke-width={@object.stroke_width}
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        <% end %>
+
         <%= if @object.kind in ["line", "arrow"] do %>
           <line
             x1="0"
@@ -1181,6 +1213,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   defp object_title("sticky"), do: "Sticky note"
   defp object_title("text"), do: "Text block"
+  defp object_title("freehand"), do: "Drawing"
   defp object_title(kind), do: kind
 
   defp object_container_class(%{kind: "text"}) do
@@ -1283,7 +1316,16 @@ defmodule OpenBoardWeb.BoardLive.Show do
   defp sticky_palette_class(color), do: color_dot_class(color)
 
   defp shape_object?(%{kind: kind}) do
-    kind in ["line", "arrow", "rectangle", "rounded_rectangle", "ellipse", "circle", "triangle"]
+    kind in [
+      "line",
+      "arrow",
+      "rectangle",
+      "rounded_rectangle",
+      "ellipse",
+      "circle",
+      "triangle",
+      "freehand"
+    ]
   end
 
   defp shape_style(%{kind: kind} = object) when kind in ["line", "arrow"] do
@@ -1404,6 +1446,52 @@ defmodule OpenBoardWeb.BoardLive.Show do
   rescue
     Ecto.NoResultsError -> :error
   end
+
+  defp freehand_object_attrs(params, socket) do
+    path = clean_freehand_path(Map.get(params, "d"))
+
+    if is_nil(path) do
+      nil
+    else
+      board = socket.assigns.board
+      stroke_width = max(round(number_param(params, "stroke_width", 4.0)), 1)
+
+      %{
+        board_id: board.id,
+        kind: "freehand",
+        text: path,
+        color: socket.assigns.selected_color,
+        x: number_param(params, "x", @workspace_width / 2),
+        y: number_param(params, "y", @workspace_height / 2),
+        width: max(number_param(params, "width", 1.0), 1.0),
+        height: max(number_param(params, "height", 1.0), 1.0),
+        z_index: Boards.next_regular_z_index(board.id),
+        is_pinned: false,
+        rotation: 0.0,
+        stroke_color: clean_stroke_color(Map.get(params, "color"), socket.assigns.selected_color),
+        fill_color: "transparent",
+        stroke_width: stroke_width
+      }
+    end
+  end
+
+  defp clean_freehand_path(path) when is_binary(path) do
+    path = String.trim(path)
+
+    cond do
+      path == "" -> nil
+      String.length(path) > 40_000 -> String.slice(path, 0, 40_000)
+      true -> path
+    end
+  end
+
+  defp clean_freehand_path(_path), do: nil
+
+  defp clean_stroke_color("#" <> hex = color, _selected_color) when byte_size(hex) == 6, do: color
+  defp clean_stroke_color(_color, selected_color), do: drawing_color_hex(selected_color)
+
+  defp freehand_path_d(%{text: text}) when is_binary(text), do: text
+  defp freehand_path_d(_object), do: ""
 
   defp number_param(params, key, fallback) do
     case Map.get(params, key) do
