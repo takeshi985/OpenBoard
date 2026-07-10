@@ -1177,9 +1177,6 @@ defmodule OpenBoardWeb.BoardLive.Show do
     "guest-#{System.unique_integer([:positive])}"
   end
 
-  defp short_guest_id("guest-" <> rest), do: "guest-" <> String.slice(rest, 0, 8)
-  defp short_guest_id(id), do: id
-
   defp board_topic(board), do: "board:#{board.id}"
 
   defp object_title("sticky"), do: "Sticky note"
@@ -1284,14 +1281,6 @@ defmodule OpenBoardWeb.BoardLive.Show do
   defp sticky_palette_class("lime"), do: "border-lime-400 bg-lime-300"
   defp sticky_palette_class("black"), do: "border-slate-900 bg-slate-950"
   defp sticky_palette_class(color), do: color_dot_class(color)
-
-  defp tool_button_class(true) do
-    "rounded-xl bg-slate-950 px-3 py-2 text-sm font-bold text-white shadow-sm hover:bg-slate-800"
-  end
-
-  defp tool_button_class(false) do
-    "rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 shadow-sm hover:bg-slate-50"
-  end
 
   defp shape_object?(%{kind: kind}) do
     kind in ["line", "arrow", "rectangle", "rounded_rectangle", "ellipse", "circle", "triangle"]
