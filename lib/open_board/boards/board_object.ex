@@ -14,7 +14,8 @@ defmodule OpenBoard.Boards.BoardObject do
     "circle",
     "triangle",
     "line",
-    "arrow"
+    "arrow",
+    "freehand"
   ]
 
   schema "board_objects" do

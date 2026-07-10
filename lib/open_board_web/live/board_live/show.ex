@@ -523,8 +523,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
   end
 
   @impl true
-  def handle_event("drawing_end", %{"stroke_id" => stroke_id}, socket) do
+  def handle_event("drawing_end", params, socket) do
     user = socket.assigns.current_user
+    stroke_id = Map.get(params, "stroke_id")
 
     Phoenix.PubSub.broadcast(
       OpenBoard.PubSub,
@@ -536,7 +537,26 @@ defmodule OpenBoardWeb.BoardLive.Show do
        }}
     )
 
-    {:noreply, socket}
+    case freehand_object_attrs(params, socket) do
+      nil ->
+        {:noreply, socket}
+
+      attrs ->
+        case Boards.create_board_object(attrs) do
+          {:ok, object} ->
+            broadcast_board_objects_changed(socket)
+
+            socket =
+              socket
+              |> push_undo({:delete_objects, [object.id]})
+              |> reload_board_objects()
+
+            {:noreply, socket}
+
+          {:error, _changeset} ->
+            {:noreply, socket}
+        end
+    end
   end
 
   @impl true
@@ -627,10 +647,10 @@ defmodule OpenBoardWeb.BoardLive.Show do
       <header class="flex h-16 items-center justify-between border-b border-slate-200 bg-white/90 px-6 shadow-sm backdrop-blur">
         <div>
           <div class="text-lg font-bold tracking-tight text-slate-950">OpenBoard</div>
-
+          
           <div class="text-xs text-slate-500">Collaborative whiteboard</div>
         </div>
-
+        
         <div class="flex items-center gap-3">
           <.link
             navigate={~p"/boards"}
@@ -638,13 +658,13 @@ defmodule OpenBoardWeb.BoardLive.Show do
           >
             Boards
           </.link>
-
+          
           <div class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
             {Enum.count(@online_users)} online
           </div>
         </div>
       </header>
-
+      
       <main class="relative h-[calc(100vh-4rem)]">
         <section
           id="board-viewport"
@@ -665,7 +685,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
               class="pointer-events-none absolute inset-0 z-0"
             >
             </div>
-
+            
             <svg
               id="drawing-layer"
               phx-update="ignore"
@@ -682,14 +702,14 @@ defmodule OpenBoardWeb.BoardLive.Show do
               class="pointer-events-none absolute z-[95000] hidden border border-blue-500 bg-blue-500/10"
             >
             </div>
-
+            
             <div
               id="remote-cursor-layer"
               phx-update="ignore"
               class="pointer-events-none absolute inset-0 z-[100000]"
             >
             </div>
-
+            
             <div class="absolute left-4 top-5 z-[120000] flex flex-col gap-3">
               <div class="rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
                 <div class="flex flex-col gap-1">
@@ -702,7 +722,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ↖
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -712,7 +732,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ◰
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="create_object"
@@ -722,7 +742,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     T
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -732,7 +752,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     □
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -742,7 +762,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ▢
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -752,7 +772,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ○
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -762,7 +782,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     △
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -772,7 +792,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ╱
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -782,7 +802,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ↗
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -792,7 +812,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ✎
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -804,7 +824,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   </button>
                 </div>
               </div>
-
+              
               <div class="rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
                 <button
                   type="button"
@@ -817,7 +837,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 </button>
               </div>
             </div>
-
+            
             <%= if @selected_tool == "sticky" do %>
               <div class="absolute left-20 top-20 z-[120001] w-[154px] rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
                 <div class="grid grid-cols-2 gap-2">
@@ -834,13 +854,13 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     ></button>
                   <% end %>
                 </div>
-
+                
                 <div class="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-center text-xs font-bold text-slate-700">
                   Sticky color
                 </div>
               </div>
             <% end %>
-
+            
             <div
               id="board-world"
               class="absolute left-0 top-0 origin-top-left"
@@ -848,12 +868,12 @@ defmodule OpenBoardWeb.BoardLive.Show do
             >
               <div class="pointer-events-none absolute left-[700px] top-[360px] z-10 rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 text-slate-700 shadow-sm backdrop-blur">
                 <div class="text-sm font-bold">Canvas</div>
-
+                
                 <div class="text-xs text-slate-500">
                   Cursor: selection. Other modes: LMB/MMB/RMB drag pans the board unless a drawing tool is active.
                 </div>
               </div>
-
+              
               <%= for object <- @board_objects do %>
                 <%= if shape_object?(object) do %>
                   <.shape_object object={object} />
@@ -877,7 +897,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                       <div class="text-xs font-bold uppercase tracking-wide opacity-70">
                         {object_title(object.kind)}
                       </div>
-
+                      
                       <div class="flex items-center gap-1">
                         <button
                           type="button"
@@ -891,7 +911,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                         >
                           📌
                         </button>
-
+                        
                         <button
                           type="button"
                           phx-click="delete_object"
@@ -902,7 +922,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                         </button>
                       </div>
                     </div>
-                    <textarea
+                     <textarea
                       phx-blur="update_text"
                       phx-value-id={object.id}
                       class={[
@@ -952,7 +972,19 @@ defmodule OpenBoardWeb.BoardLive.Show do
             </marker>
           </defs>
         <% end %>
-
+        
+        <%= if @object.kind == "freehand" do %>
+          <path
+            data-freehand-path="true"
+            d={freehand_path_d(@object)}
+            fill="none"
+            stroke={@object.stroke_color}
+            stroke-width={@object.stroke_width}
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        <% end %>
+        
         <%= if @object.kind in ["line", "arrow"] do %>
           <line
             x1="0"
@@ -966,7 +998,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             marker-end={if @object.kind == "arrow", do: "url(#arrowhead-#{@object.id})", else: nil}
           />
         <% end %>
-
+        
         <%= if @object.kind == "rectangle" do %>
           <rect
             x={shape_stroke_offset(@object)}
@@ -979,7 +1011,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             vector-effect="non-scaling-stroke"
           />
         <% end %>
-
+        
         <%= if @object.kind == "rounded_rectangle" do %>
           <rect
             x={shape_stroke_offset(@object)}
@@ -994,7 +1026,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             vector-effect="non-scaling-stroke"
           />
         <% end %>
-
+        
         <%= if @object.kind in ["ellipse", "circle"] do %>
           <ellipse
             cx={@object.width / 2}
@@ -1007,7 +1039,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             vector-effect="non-scaling-stroke"
           />
         <% end %>
-
+        
         <%= if @object.kind == "triangle" do %>
           <polygon
             points={triangle_points(@object)}
@@ -1181,6 +1213,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   defp object_title("sticky"), do: "Sticky note"
   defp object_title("text"), do: "Text block"
+  defp object_title("freehand"), do: "Drawing"
   defp object_title(kind), do: kind
 
   defp object_container_class(%{kind: "text"}) do
@@ -1283,7 +1316,16 @@ defmodule OpenBoardWeb.BoardLive.Show do
   defp sticky_palette_class(color), do: color_dot_class(color)
 
   defp shape_object?(%{kind: kind}) do
-    kind in ["line", "arrow", "rectangle", "rounded_rectangle", "ellipse", "circle", "triangle"]
+    kind in [
+      "line",
+      "arrow",
+      "rectangle",
+      "rounded_rectangle",
+      "ellipse",
+      "circle",
+      "triangle",
+      "freehand"
+    ]
   end
 
   defp shape_style(%{kind: kind} = object) when kind in ["line", "arrow"] do
@@ -1404,6 +1446,52 @@ defmodule OpenBoardWeb.BoardLive.Show do
   rescue
     Ecto.NoResultsError -> :error
   end
+
+  defp freehand_object_attrs(params, socket) do
+    path = clean_freehand_path(Map.get(params, "d"))
+
+    if is_nil(path) do
+      nil
+    else
+      board = socket.assigns.board
+      stroke_width = max(round(number_param(params, "stroke_width", 4.0)), 1)
+
+      %{
+        board_id: board.id,
+        kind: "freehand",
+        text: path,
+        color: socket.assigns.selected_color,
+        x: number_param(params, "x", @workspace_width / 2),
+        y: number_param(params, "y", @workspace_height / 2),
+        width: max(number_param(params, "width", 1.0), 1.0),
+        height: max(number_param(params, "height", 1.0), 1.0),
+        z_index: Boards.next_regular_z_index(board.id),
+        is_pinned: false,
+        rotation: 0.0,
+        stroke_color: clean_stroke_color(Map.get(params, "color"), socket.assigns.selected_color),
+        fill_color: "transparent",
+        stroke_width: stroke_width
+      }
+    end
+  end
+
+  defp clean_freehand_path(path) when is_binary(path) do
+    path = String.trim(path)
+
+    cond do
+      path == "" -> nil
+      String.length(path) > 40_000 -> String.slice(path, 0, 40_000)
+      true -> path
+    end
+  end
+
+  defp clean_freehand_path(_path), do: nil
+
+  defp clean_stroke_color("#" <> hex = color, _selected_color) when byte_size(hex) == 6, do: color
+  defp clean_stroke_color(_color, selected_color), do: drawing_color_hex(selected_color)
+
+  defp freehand_path_d(%{text: text}) when is_binary(text), do: text
+  defp freehand_path_d(_object), do: ""
 
   defp number_param(params, key, fallback) do
     case Map.get(params, key) do

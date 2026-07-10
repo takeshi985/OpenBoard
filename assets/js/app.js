@@ -19,6 +19,7 @@ const STAIR_SMOOTHING_SCREEN_EPSILON = 1.8
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 2.5
 const MARQUEE_MIN_SIZE = 4
+const OBJECT_CLIPBOARD_KEY = "open_board_clipboard_object_ids"
 
 const SHAPE_TOOLS = new Set([
   "line",
@@ -462,6 +463,54 @@ function buildShapePayload(kind, startPoint, currentPoint) {
   }
 }
 
+function buildFreehandObjectPayload(path, strokeId, color, strokeWidth) {
+  if (!path) {
+    return null
+  }
+
+  const rawPoints = getPathRawPoints(path)
+
+  if (rawPoints.length < 2) {
+    return null
+  }
+
+  const padding = Math.max(strokeWidth * 2, 8)
+  const minX = Math.min(...rawPoints.map((point) => point.x))
+  const minY = Math.min(...rawPoints.map((point) => point.y))
+  const maxX = Math.max(...rawPoints.map((point) => point.x))
+  const maxY = Math.max(...rawPoints.map((point) => point.y))
+
+  const left = minX - padding
+  const top = minY - padding
+  const width = Math.max(maxX - minX + padding * 2, strokeWidth * 2, 1)
+  const height = Math.max(maxY - minY + padding * 2, strokeWidth * 2, 1)
+
+  const normalizedPoints = rawPoints.map((point) => ({
+    x: point.x - left,
+    y: point.y - top
+  }))
+
+  const epsilon = Number(path.dataset.smoothingEpsilon || 2)
+  const simplifiedPoints = simplifyDouglasPeucker(normalizedPoints, epsilon)
+  const d = buildCatmullRomPath(simplifiedPoints)
+
+  if (!d || d.trim() === "") {
+    return null
+  }
+
+  return {
+    stroke_id: strokeId,
+    x: left,
+    y: top,
+    width: width,
+    height: height,
+    d: d,
+    color: color,
+    stroke_width: strokeWidth,
+    smoothing_epsilon: epsilon
+  }
+}
+
 Hooks.BoardSurface = {
   mounted() {
     this.guest = getOrCreateGuestSession()
@@ -527,45 +576,52 @@ Hooks.BoardSurface = {
     }
 
     this.onKeyDown = (event) => {
-      const tagName = event.target.tagName.toLowerCase()
-
-      if (tagName === "input" || tagName === "textarea" || event.target.isContentEditable) {
-        return
-      }
-
+      const tagName = (event.target && event.target.tagName ? event.target.tagName : "").toLowerCase()
+      const isEditableTarget =
+        tagName === "input" || tagName === "textarea" || Boolean(event.target && event.target.isContentEditable)
       const isCommandKey = event.ctrlKey || event.metaKey
       const key = event.key.toLowerCase()
 
       if (isCommandKey && key === "a") {
         event.preventDefault()
+        this.blurEditableTarget(isEditableTarget)
         this.selectAllObjects()
         return
       }
 
       if (isCommandKey && key === "c") {
         event.preventDefault()
+        this.blurEditableTarget(isEditableTarget)
         this.copySelectedObjects()
         return
       }
 
       if (isCommandKey && key === "v") {
         event.preventDefault()
+        this.blurEditableTarget(isEditableTarget)
         this.pasteCopiedObjects()
         return
       }
 
       if (isCommandKey && key === "z" && !event.shiftKey) {
         event.preventDefault()
+        this.blurEditableTarget(isEditableTarget)
         this.clearSelectedObjects()
         this.pushEvent("undo", {})
         return
       }
 
-      if ((event.key === "Delete" || event.key === "Backspace") && this.selectedObjectIds.size > 0) {
+      if (isEditableTarget) {
+        return
+      }
+
+      const selectedIds = this.currentSelectedObjectIds()
+
+      if ((event.key === "Delete" || event.key === "Backspace") && selectedIds.length > 0) {
         event.preventDefault()
 
         this.pushEvent("delete_objects", {
-          ids: Array.from(this.selectedObjectIds)
+          ids: selectedIds
         })
 
         this.selectedObjectIds.clear()
@@ -728,7 +784,7 @@ Hooks.BoardSurface = {
     })
 
     this.handleEvent("remote_drawing_finished", (drawing) => {
-      this.remoteStrokes.delete(drawing.stroke_id)
+      this.removeStroke(drawing.stroke_id)
     })
 
     this.handleEvent("remote_drawing_erased", (drawing) => {
@@ -739,7 +795,7 @@ Hooks.BoardSurface = {
     this.el.addEventListener("wheel", this.onWheel, { passive: false })
     this.el.addEventListener("pointermove", this.onPointerMove)
     this.el.addEventListener("pointerdown", this.onPointerDown)
-    document.addEventListener("keydown", this.onKeyDown)
+    document.addEventListener("keydown", this.onKeyDown, true)
   },
 
   updated() {
@@ -772,7 +828,7 @@ Hooks.BoardSurface = {
     }
 
     if (this.onKeyDown) {
-      document.removeEventListener("keydown", this.onKeyDown)
+      document.removeEventListener("keydown", this.onKeyDown, true)
     }
 
     if (this.onDocumentPointerMove) {
@@ -1010,7 +1066,7 @@ Hooks.BoardSurface = {
   },
 
   selectObjects(objectIds) {
-    this.selectedObjectIds = new Set(objectIds)
+    this.selectedObjectIds = new Set((objectIds || []).map((objectId) => `${objectId}`))
     this.clearSelectionOutline()
     this.reapplySelectionOutline()
   },
@@ -1023,22 +1079,84 @@ Hooks.BoardSurface = {
     this.selectObjects(objectIds)
   },
 
-  copySelectedObjects() {
-    if (!this.selectedObjectIds || this.selectedObjectIds.size === 0) {
-      this.clipboardObjectIds = []
+  currentSelectedObjectIds() {
+    const selectedIds = new Set()
+
+    if (this.selectedObjectIds) {
+      for (const objectId of this.selectedObjectIds) {
+        if (objectId) {
+          selectedIds.add(`${objectId}`)
+        }
+      }
+    }
+
+    document.querySelectorAll("[data-board-object].ring-blue-500").forEach((element) => {
+      if (element.dataset.objectId) {
+        selectedIds.add(`${element.dataset.objectId}`)
+      }
+    })
+
+    return Array.from(selectedIds)
+  },
+
+  rememberClipboardObjectIds(objectIds) {
+    this.clipboardObjectIds = (objectIds || []).map((objectId) => `${objectId}`)
+
+    try {
+      sessionStorage.setItem(OBJECT_CLIPBOARD_KEY, JSON.stringify(this.clipboardObjectIds))
+    } catch (_error) {
+      // Session storage can be unavailable in some privacy modes.
+    }
+  },
+
+  readClipboardObjectIds() {
+    if (this.clipboardObjectIds && this.clipboardObjectIds.length > 0) {
+      return this.clipboardObjectIds
+    }
+
+    try {
+      const storedValue = sessionStorage.getItem(OBJECT_CLIPBOARD_KEY)
+      const parsedValue = JSON.parse(storedValue || "[]")
+
+      if (Array.isArray(parsedValue)) {
+        this.clipboardObjectIds = parsedValue.map((objectId) => `${objectId}`).filter(Boolean)
+        return this.clipboardObjectIds
+      }
+    } catch (_error) {
+      // Ignore invalid stored clipboard values.
+    }
+
+    return []
+  },
+
+  blurEditableTarget(isEditableTarget) {
+    if (!isEditableTarget || !document.activeElement || document.activeElement === document.body) {
       return
     }
 
-    this.clipboardObjectIds = Array.from(this.selectedObjectIds)
+    document.activeElement.blur()
+  },
+
+  copySelectedObjects() {
+    const objectIds = this.currentSelectedObjectIds()
+
+    if (objectIds.length === 0) {
+      this.rememberClipboardObjectIds([])
+      return
+    }
+
+    this.rememberClipboardObjectIds(objectIds)
   },
 
   pasteCopiedObjects() {
-    if (!this.clipboardObjectIds || this.clipboardObjectIds.length === 0) {
+    const objectIds = this.readClipboardObjectIds()
+
+    if (objectIds.length === 0) {
       return
     }
 
     this.pushEvent("paste_objects", {
-      ids: this.clipboardObjectIds
+      ids: objectIds
     })
   },
 
@@ -1357,9 +1475,23 @@ Hooks.BoardSurface = {
     document.removeEventListener("pointermove", this.onDocumentPointerMove)
     document.removeEventListener("pointerup", this.onDocumentPointerUp)
 
-    this.pushEvent("drawing_end", {
-      stroke_id: this.currentStrokeId
-    })
+    const strokeId = this.currentStrokeId
+    const freehandPayload = buildFreehandObjectPayload(
+      this.currentLocalPath,
+      strokeId,
+      this.selectedColor,
+      4
+    )
+
+    if (freehandPayload) {
+      this.pushEvent("drawing_end", freehandPayload)
+    } else {
+      this.pushEvent("drawing_end", {
+        stroke_id: strokeId
+      })
+    }
+
+    this.removeStroke(strokeId)
 
     this.currentStrokeId = null
     this.currentLocalPath = null
@@ -1395,7 +1527,7 @@ Hooks.BoardSurface = {
     const paths = Array.from(this.drawingLayer.querySelectorAll("path[data-stroke-id]"))
 
     for (const path of paths) {
-      if (isPointNearPath(point, path, ERASER_RADIUS)) {
+      if (isPointNearPath(point, path, ERASER_RADIUS / this.camera.zoom)) {
         const strokeId = path.dataset.strokeId
 
         this.removeStroke(strokeId)
@@ -1403,6 +1535,33 @@ Hooks.BoardSurface = {
         this.pushEvent("drawing_erase", {
           stroke_id: strokeId
         })
+      }
+    }
+
+    const freehandObjects = Array.from(
+      document.querySelectorAll('[data-board-object][data-object-kind="freehand"]')
+    )
+
+    for (const objectElement of freehandObjects) {
+      const path = objectElement.querySelector("path[data-freehand-path]")
+
+      if (!path) {
+        continue
+      }
+
+      const objectX = parseFloat(objectElement.style.left || "0")
+      const objectY = parseFloat(objectElement.style.top || "0")
+      const localPoint = {
+        x: point.x - objectX,
+        y: point.y - objectY
+      }
+
+      if (isPointNearPath(localPoint, path, ERASER_RADIUS / this.camera.zoom)) {
+        this.pushEvent("delete_object", {
+          id: objectElement.dataset.objectId
+        })
+
+        return
       }
     }
   },
