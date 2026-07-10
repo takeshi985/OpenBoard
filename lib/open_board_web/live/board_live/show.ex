@@ -627,10 +627,10 @@ defmodule OpenBoardWeb.BoardLive.Show do
       <header class="flex h-16 items-center justify-between border-b border-slate-200 bg-white/90 px-6 shadow-sm backdrop-blur">
         <div>
           <div class="text-lg font-bold tracking-tight text-slate-950">OpenBoard</div>
-          
+
           <div class="text-xs text-slate-500">Collaborative whiteboard</div>
         </div>
-        
+
         <div class="flex items-center gap-3">
           <.link
             navigate={~p"/boards"}
@@ -638,13 +638,13 @@ defmodule OpenBoardWeb.BoardLive.Show do
           >
             Boards
           </.link>
-          
+
           <div class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
             {Enum.count(@online_users)} online
           </div>
         </div>
       </header>
-      
+
       <main class="relative h-[calc(100vh-4rem)]">
         <section
           id="board-viewport"
@@ -665,7 +665,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
               class="pointer-events-none absolute inset-0 z-0"
             >
             </div>
-            
+
             <svg
               id="drawing-layer"
               phx-update="ignore"
@@ -682,14 +682,14 @@ defmodule OpenBoardWeb.BoardLive.Show do
               class="pointer-events-none absolute z-[95000] hidden border border-blue-500 bg-blue-500/10"
             >
             </div>
-            
+
             <div
               id="remote-cursor-layer"
               phx-update="ignore"
               class="pointer-events-none absolute inset-0 z-[100000]"
             >
             </div>
-            
+
             <div class="absolute left-4 top-5 z-[120000] flex flex-col gap-3">
               <div class="rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
                 <div class="flex flex-col gap-1">
@@ -702,7 +702,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ↖
                   </button>
-                  
+
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -712,7 +712,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ◰
                   </button>
-                  
+
                   <button
                     type="button"
                     phx-click="create_object"
@@ -722,7 +722,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     T
                   </button>
-                  
+
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -732,7 +732,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     □
                   </button>
-                  
+
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -742,7 +742,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ▢
                   </button>
-                  
+
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -752,7 +752,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ○
                   </button>
-                  
+
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -762,7 +762,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     △
                   </button>
-                  
+
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -772,7 +772,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ╱
                   </button>
-                  
+
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -782,7 +782,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ↗
                   </button>
-                  
+
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -792,7 +792,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ✎
                   </button>
-                  
+
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -804,7 +804,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   </button>
                 </div>
               </div>
-              
+
               <div class="rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
                 <button
                   type="button"
@@ -817,7 +817,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 </button>
               </div>
             </div>
-            
+
             <%= if @selected_tool == "sticky" do %>
               <div class="absolute left-20 top-20 z-[120001] w-[154px] rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
                 <div class="grid grid-cols-2 gap-2">
@@ -834,13 +834,13 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     ></button>
                   <% end %>
                 </div>
-                
+
                 <div class="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-center text-xs font-bold text-slate-700">
                   Sticky color
                 </div>
               </div>
             <% end %>
-            
+
             <div
               id="board-world"
               class="absolute left-0 top-0 origin-top-left"
@@ -848,12 +848,12 @@ defmodule OpenBoardWeb.BoardLive.Show do
             >
               <div class="pointer-events-none absolute left-[700px] top-[360px] z-10 rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 text-slate-700 shadow-sm backdrop-blur">
                 <div class="text-sm font-bold">Canvas</div>
-                
+
                 <div class="text-xs text-slate-500">
                   Cursor: selection. Other modes: LMB/MMB/RMB drag pans the board unless a drawing tool is active.
                 </div>
               </div>
-              
+
               <%= for object <- @board_objects do %>
                 <%= if shape_object?(object) do %>
                   <.shape_object object={object} />
@@ -877,7 +877,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                       <div class="text-xs font-bold uppercase tracking-wide opacity-70">
                         {object_title(object.kind)}
                       </div>
-                      
+
                       <div class="flex items-center gap-1">
                         <button
                           type="button"
@@ -891,7 +891,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                         >
                           📌
                         </button>
-                        
+
                         <button
                           type="button"
                           phx-click="delete_object"
@@ -902,7 +902,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                         </button>
                       </div>
                     </div>
-                     <textarea
+                    <textarea
                       phx-blur="update_text"
                       phx-value-id={object.id}
                       class={[
@@ -952,7 +952,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             </marker>
           </defs>
         <% end %>
-        
+
         <%= if @object.kind in ["line", "arrow"] do %>
           <line
             x1="0"
@@ -966,7 +966,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             marker-end={if @object.kind == "arrow", do: "url(#arrowhead-#{@object.id})", else: nil}
           />
         <% end %>
-        
+
         <%= if @object.kind == "rectangle" do %>
           <rect
             x={shape_stroke_offset(@object)}
@@ -979,7 +979,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             vector-effect="non-scaling-stroke"
           />
         <% end %>
-        
+
         <%= if @object.kind == "rounded_rectangle" do %>
           <rect
             x={shape_stroke_offset(@object)}
@@ -994,7 +994,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             vector-effect="non-scaling-stroke"
           />
         <% end %>
-        
+
         <%= if @object.kind in ["ellipse", "circle"] do %>
           <ellipse
             cx={@object.width / 2}
@@ -1007,7 +1007,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             vector-effect="non-scaling-stroke"
           />
         <% end %>
-        
+
         <%= if @object.kind == "triangle" do %>
           <polygon
             points={triangle_points(@object)}
