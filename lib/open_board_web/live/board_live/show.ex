@@ -82,6 +82,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
           |> assign(:available_colors, @colors)
           |> assign(:workspace_width, @workspace_width)
           |> assign(:workspace_height, @workspace_height)
+          |> assign(:undo_stack, [])
 
         {:ok, socket}
     end
@@ -138,11 +139,12 @@ defmodule OpenBoardWeb.BoardLive.Show do
     }
 
     case Boards.create_board_object(attrs) do
-      {:ok, _object} ->
+      {:ok, object} ->
         broadcast_board_objects_changed(socket)
 
         socket =
           socket
+          |> push_undo({:delete_objects, [object.id]})
           |> assign(:selected_color, color)
           |> assign(:selected_tool, "pan")
           |> reload_board_objects()
@@ -176,9 +178,15 @@ defmodule OpenBoardWeb.BoardLive.Show do
       })
 
     case Boards.create_board_object(attrs) do
-      {:ok, _object} ->
+      {:ok, object} ->
         broadcast_board_objects_changed(socket)
-        {:noreply, reload_board_objects(socket)}
+
+        socket =
+          socket
+          |> push_undo({:delete_objects, [object.id]})
+          |> reload_board_objects()
+
+        {:noreply, socket}
 
       {:error, _changeset} ->
         {:noreply, put_flash(socket, :error, "Could not create object")}
@@ -211,9 +219,15 @@ defmodule OpenBoardWeb.BoardLive.Show do
       })
 
     case Boards.create_board_object(attrs) do
-      {:ok, _object} ->
+      {:ok, object} ->
         broadcast_board_objects_changed(socket)
-        {:noreply, reload_board_objects(socket)}
+
+        socket =
+          socket
+          |> push_undo({:delete_objects, [object.id]})
+          |> reload_board_objects()
+
+        {:noreply, socket}
 
       {:error, _changeset} ->
         {:noreply, put_flash(socket, :error, "Could not create shape")}
@@ -225,48 +239,123 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   @impl true
   def handle_event("delete_object", %{"id" => id}, socket) do
-    object = Boards.get_board_object!(id)
+    case safe_get_board_object(id) do
+      {:ok, object} when object.board_id == socket.assigns.board.id ->
+        snapshot = object_snapshot(object)
 
-    if object.board_id == socket.assigns.board.id do
-      Boards.delete_board_object(object)
-      broadcast_board_objects_changed(socket)
+        Boards.delete_board_object(object)
+        broadcast_board_objects_changed(socket)
 
-      {:noreply, reload_board_objects(socket)}
-    else
-      {:noreply, socket}
+        socket =
+          socket
+          |> push_undo({:restore_objects, [snapshot]})
+          |> reload_board_objects()
+
+        {:noreply, socket}
+
+      _other ->
+        {:noreply, socket}
     end
   end
 
   @impl true
   def handle_event("delete_objects", %{"ids" => ids}, socket) when is_list(ids) do
-    ids
-    |> Enum.uniq()
-    |> Enum.each(fn id ->
-      case safe_get_board_object(id) do
-        {:ok, object} when object.board_id == socket.assigns.board.id ->
-          Boards.delete_board_object(object)
+    objects = get_board_objects_by_ids(socket.assigns.board, ids)
+    snapshots = Enum.map(objects, &object_snapshot/1)
 
-        _other ->
-          :ok
+    Enum.each(objects, &Boards.delete_board_object/1)
+
+    socket =
+      if snapshots == [] do
+        socket
+      else
+        broadcast_board_objects_changed(socket)
+
+        socket
+        |> push_undo({:restore_objects, snapshots})
+        |> reload_board_objects()
       end
-    end)
 
-    broadcast_board_objects_changed(socket)
-    {:noreply, reload_board_objects(socket)}
+    {:noreply, socket}
   end
 
   @impl true
   def handle_event("delete_objects", _params, socket), do: {:noreply, socket}
 
   @impl true
+  def handle_event("paste_objects", %{"ids" => ids}, socket) when is_list(ids) do
+    board = socket.assigns.board
+    objects = get_board_objects_by_ids(board, ids)
+
+    {created_ids, socket} =
+      objects
+      |> Enum.reduce({[], socket}, fn object, {created_ids, socket} ->
+        attrs = clone_object_attrs(object, board.id)
+
+        case Boards.create_board_object(attrs) do
+          {:ok, created_object} ->
+            {[created_object.id | created_ids], socket}
+
+          {:error, _changeset} ->
+            {created_ids, socket}
+        end
+      end)
+
+    created_ids = Enum.reverse(created_ids)
+
+    socket =
+      if created_ids == [] do
+        socket
+      else
+        broadcast_board_objects_changed(socket)
+
+        socket
+        |> push_undo({:delete_objects, created_ids})
+        |> reload_board_objects()
+        |> push_event("objects_pasted", %{ids: created_ids})
+      end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("paste_objects", _params, socket), do: {:noreply, socket}
+
+  @impl true
+  def handle_event("undo", _params, socket) do
+    case socket.assigns.undo_stack do
+      [] ->
+        {:noreply, socket}
+
+      [action | undo_stack] ->
+        apply_undo_action(socket.assigns.board, action)
+        broadcast_board_objects_changed(socket)
+
+        socket =
+          socket
+          |> assign(:undo_stack, undo_stack)
+          |> reload_board_objects()
+
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
   def handle_event("update_text", %{"id" => id, "value" => text}, socket) do
     object = Boards.get_board_object!(id)
 
     if object.board_id == socket.assigns.board.id do
+      previous_snapshot = existing_object_snapshot(object)
+
       Boards.update_board_object(object, %{text: text})
       broadcast_board_objects_changed(socket)
 
-      {:noreply, reload_board_objects(socket)}
+      socket =
+        socket
+        |> push_undo({:restore_existing_objects, [previous_snapshot]})
+        |> reload_board_objects()
+
+      {:noreply, socket}
     else
       {:noreply, socket}
     end
@@ -305,6 +394,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
     object = Boards.get_board_object!(id)
 
     if object.board_id == socket.assigns.board.id do
+      previous_snapshot = existing_object_snapshot(object)
+
       attrs =
         if object.is_pinned do
           %{x: x, y: y, z_index: Boards.next_pinned_z_index(object.board_id)}
@@ -315,7 +406,12 @@ defmodule OpenBoardWeb.BoardLive.Show do
       Boards.update_board_object(object, attrs)
       broadcast_board_objects_changed(socket)
 
-      {:noreply, reload_board_objects(socket)}
+      socket =
+        socket
+        |> push_undo({:restore_existing_objects, [previous_snapshot]})
+        |> reload_board_objects()
+
+      {:noreply, socket}
     else
       {:noreply, socket}
     end
@@ -330,6 +426,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
     object = Boards.get_board_object!(id)
 
     if object.board_id == socket.assigns.board.id do
+      previous_snapshot = existing_object_snapshot(object)
+
       attrs =
         if object.is_pinned do
           %{
@@ -352,7 +450,12 @@ defmodule OpenBoardWeb.BoardLive.Show do
       Boards.update_board_object(object, attrs)
       broadcast_board_objects_changed(socket)
 
-      {:noreply, reload_board_objects(socket)}
+      socket =
+        socket
+        |> push_undo({:restore_existing_objects, [previous_snapshot]})
+        |> reload_board_objects()
+
+      {:noreply, socket}
     else
       {:noreply, socket}
     end
@@ -524,9 +627,10 @@ defmodule OpenBoardWeb.BoardLive.Show do
       <header class="flex h-16 items-center justify-between border-b border-slate-200 bg-white/90 px-6 shadow-sm backdrop-blur">
         <div>
           <div class="text-lg font-bold tracking-tight text-slate-950">OpenBoard</div>
+          
           <div class="text-xs text-slate-500">Collaborative whiteboard</div>
         </div>
-
+        
         <div class="flex items-center gap-3">
           <.link
             navigate={~p"/boards"}
@@ -534,13 +638,13 @@ defmodule OpenBoardWeb.BoardLive.Show do
           >
             Boards
           </.link>
-
+          
           <div class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
             {Enum.count(@online_users)} online
           </div>
         </div>
       </header>
-
+      
       <main class="relative h-[calc(100vh-4rem)]">
         <section
           id="board-viewport"
@@ -561,33 +665,31 @@ defmodule OpenBoardWeb.BoardLive.Show do
               class="pointer-events-none absolute inset-0 z-0"
             >
             </div>
-
+            
             <svg
               id="drawing-layer"
               phx-update="ignore"
               class="pointer-events-none absolute inset-0 z-[1] h-full w-full"
             ></svg>
-
             <svg
               id="shape-preview-layer"
               phx-update="ignore"
               class="pointer-events-none absolute inset-0 z-[90000] h-full w-full"
             ></svg>
-
             <div
               id="selection-box"
               phx-update="ignore"
               class="pointer-events-none absolute z-[95000] hidden border border-blue-500 bg-blue-500/10"
             >
             </div>
-
+            
             <div
               id="remote-cursor-layer"
               phx-update="ignore"
               class="pointer-events-none absolute inset-0 z-[100000]"
             >
             </div>
-
+            
             <div class="absolute left-4 top-5 z-[120000] flex flex-col gap-3">
               <div class="rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
                 <div class="flex flex-col gap-1">
@@ -600,7 +702,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ↖
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -610,7 +712,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ◰
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="create_object"
@@ -620,7 +722,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     T
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -630,7 +732,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     □
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -640,7 +742,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ▢
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -650,7 +752,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ○
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -660,7 +762,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     △
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -670,7 +772,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ╱
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -680,7 +782,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ↗
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -690,7 +792,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   >
                     ✎
                   </button>
-
+                  
                   <button
                     type="button"
                     phx-click="select_tool"
@@ -702,7 +804,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   </button>
                 </div>
               </div>
-
+              
               <div class="rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
                 <button
                   type="button"
@@ -715,7 +817,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 </button>
               </div>
             </div>
-
+            
             <%= if @selected_tool == "sticky" do %>
               <div class="absolute left-20 top-20 z-[120001] w-[154px] rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
                 <div class="grid grid-cols-2 gap-2">
@@ -732,13 +834,13 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     ></button>
                   <% end %>
                 </div>
-
+                
                 <div class="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-center text-xs font-bold text-slate-700">
                   Sticky color
                 </div>
               </div>
             <% end %>
-
+            
             <div
               id="board-world"
               class="absolute left-0 top-0 origin-top-left"
@@ -746,12 +848,12 @@ defmodule OpenBoardWeb.BoardLive.Show do
             >
               <div class="pointer-events-none absolute left-[700px] top-[360px] z-10 rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 text-slate-700 shadow-sm backdrop-blur">
                 <div class="text-sm font-bold">Canvas</div>
-
+                
                 <div class="text-xs text-slate-500">
                   Cursor: selection. Other modes: LMB/MMB/RMB drag pans the board unless a drawing tool is active.
                 </div>
               </div>
-
+              
               <%= for object <- @board_objects do %>
                 <%= if shape_object?(object) do %>
                   <.shape_object object={object} />
@@ -775,7 +877,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                       <div class="text-xs font-bold uppercase tracking-wide opacity-70">
                         {object_title(object.kind)}
                       </div>
-
+                      
                       <div class="flex items-center gap-1">
                         <button
                           type="button"
@@ -789,7 +891,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                         >
                           📌
                         </button>
-
+                        
                         <button
                           type="button"
                           phx-click="delete_object"
@@ -800,8 +902,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
                         </button>
                       </div>
                     </div>
-
-                    <textarea
+                     <textarea
                       phx-blur="update_text"
                       phx-value-id={object.id}
                       class={[
@@ -851,7 +952,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             </marker>
           </defs>
         <% end %>
-
+        
         <%= if @object.kind in ["line", "arrow"] do %>
           <line
             x1="0"
@@ -865,7 +966,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             marker-end={if @object.kind == "arrow", do: "url(#arrowhead-#{@object.id})", else: nil}
           />
         <% end %>
-
+        
         <%= if @object.kind == "rectangle" do %>
           <rect
             x={shape_stroke_offset(@object)}
@@ -878,7 +979,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             vector-effect="non-scaling-stroke"
           />
         <% end %>
-
+        
         <%= if @object.kind == "rounded_rectangle" do %>
           <rect
             x={shape_stroke_offset(@object)}
@@ -893,7 +994,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             vector-effect="non-scaling-stroke"
           />
         <% end %>
-
+        
         <%= if @object.kind in ["ellipse", "circle"] do %>
           <ellipse
             cx={@object.width / 2}
@@ -906,7 +1007,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             vector-effect="non-scaling-stroke"
           />
         <% end %>
-
+        
         <%= if @object.kind == "triangle" do %>
           <polygon
             points={triangle_points(@object)}
@@ -1220,6 +1321,94 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   defp line_y(object), do: object.height / 2
   defp line_end_x(object), do: max(object.width, 1)
+
+  defp push_undo(socket, action) do
+    undo_stack = socket.assigns[:undo_stack] || []
+    assign(socket, :undo_stack, [action | Enum.take(undo_stack, 39)])
+  end
+
+  defp get_board_objects_by_ids(board, ids) do
+    ids
+    |> Enum.uniq()
+    |> Enum.reduce([], fn id, objects ->
+      case safe_get_board_object(id) do
+        {:ok, object} when object.board_id == board.id -> [object | objects]
+        _other -> objects
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp object_snapshot(object) do
+    object
+    |> existing_object_snapshot()
+    |> Map.delete(:id)
+  end
+
+  defp existing_object_snapshot(object) do
+    %{
+      id: object.id,
+      board_id: object.board_id,
+      kind: object.kind,
+      text: object.text,
+      color: object.color,
+      x: object.x,
+      y: object.y,
+      width: object.width,
+      height: object.height,
+      z_index: object.z_index,
+      is_pinned: object.is_pinned,
+      rotation: object.rotation,
+      stroke_color: object.stroke_color,
+      fill_color: object.fill_color,
+      stroke_width: object.stroke_width
+    }
+  end
+
+  defp clone_object_attrs(object, board_id) do
+    object
+    |> object_snapshot()
+    |> Map.merge(%{
+      board_id: board_id,
+      x: object.x + 40,
+      y: object.y + 40,
+      z_index: Boards.next_regular_z_index(board_id),
+      is_pinned: false
+    })
+  end
+
+  defp apply_undo_action(board, {:delete_objects, ids}) do
+    board
+    |> get_board_objects_by_ids(ids)
+    |> Enum.each(&Boards.delete_board_object/1)
+  end
+
+  defp apply_undo_action(board, {:restore_objects, snapshots}) do
+    Enum.each(snapshots, fn snapshot ->
+      snapshot
+      |> Map.put(:board_id, board.id)
+      |> Boards.create_board_object()
+    end)
+  end
+
+  defp apply_undo_action(board, {:restore_existing_objects, snapshots}) do
+    Enum.each(snapshots, fn %{id: id} = snapshot ->
+      case safe_get_board_object(id) do
+        {:ok, object} when object.board_id == board.id ->
+          attrs =
+            snapshot
+            |> Map.delete(:id)
+            |> Map.put(:board_id, board.id)
+
+          Boards.update_board_object(object, attrs)
+
+        _other ->
+          :ok
+      end
+    end)
+  end
+
+  defp apply_undo_action(_board, _action), do: :ok
 
   defp safe_get_board_object(id) do
     {:ok, Boards.get_board_object!(id)}

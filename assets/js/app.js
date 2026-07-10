@@ -483,6 +483,7 @@ Hooks.BoardSurface = {
     this.remoteCursors = new Map()
     this.remoteStrokes = new Map()
     this.selectedObjectIds = new Set()
+    this.clipboardObjectIds = []
     this.selectionBox = document.getElementById("selection-box")
 
     this.lastCursorSentAt = 0
@@ -532,9 +533,31 @@ Hooks.BoardSurface = {
         return
       }
 
-      if (event.ctrlKey && event.key.toLowerCase() === "a") {
+      const isCommandKey = event.ctrlKey || event.metaKey
+      const key = event.key.toLowerCase()
+
+      if (isCommandKey && key === "a") {
         event.preventDefault()
         this.selectAllObjects()
+        return
+      }
+
+      if (isCommandKey && key === "c") {
+        event.preventDefault()
+        this.copySelectedObjects()
+        return
+      }
+
+      if (isCommandKey && key === "v") {
+        event.preventDefault()
+        this.pasteCopiedObjects()
+        return
+      }
+
+      if (isCommandKey && key === "z" && !event.shiftKey) {
+        event.preventDefault()
+        this.clearSelectedObjects()
+        this.pushEvent("undo", {})
         return
       }
 
@@ -665,6 +688,14 @@ Hooks.BoardSurface = {
 
     this.handleEvent("presence_sync", ({ user_ids }) => {
       this.cleanupRemoteCursors(user_ids)
+    })
+
+    this.handleEvent("objects_pasted", ({ ids }) => {
+      const pastedIds = (ids || []).map((id) => `${id}`)
+
+      window.setTimeout(() => {
+        this.selectObjects(pastedIds)
+      }, 0)
     })
 
     this.handleEvent("remote_drawing_started", (drawing) => {
@@ -990,6 +1021,25 @@ Hooks.BoardSurface = {
       .filter(Boolean)
 
     this.selectObjects(objectIds)
+  },
+
+  copySelectedObjects() {
+    if (!this.selectedObjectIds || this.selectedObjectIds.size === 0) {
+      this.clipboardObjectIds = []
+      return
+    }
+
+    this.clipboardObjectIds = Array.from(this.selectedObjectIds)
+  },
+
+  pasteCopiedObjects() {
+    if (!this.clipboardObjectIds || this.clipboardObjectIds.length === 0) {
+      return
+    }
+
+    this.pushEvent("paste_objects", {
+      ids: this.clipboardObjectIds
+    })
   },
 
   clearSelectedObjects() {
