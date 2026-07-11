@@ -390,6 +390,55 @@ defmodule OpenBoardWeb.BoardLive.Show do
   end
 
   @impl true
+  def handle_event("move_objects", %{"objects" => object_params}, socket)
+      when is_list(object_params) do
+    board = socket.assigns.board
+
+    updates =
+      object_params
+      |> Enum.reduce([], fn params, updates ->
+        id = Map.get(params, "id")
+
+        case safe_get_board_object(id) do
+          {:ok, object} when object.board_id == board.id ->
+            attrs = %{
+              x: number_param(params, "x", object.x),
+              y: number_param(params, "y", object.y)
+            }
+
+            [{object, attrs} | updates]
+
+          _other ->
+            updates
+        end
+      end)
+      |> Enum.reverse()
+
+    previous_snapshots =
+      Enum.map(updates, fn {object, _attrs} -> existing_object_snapshot(object) end)
+
+    Enum.each(updates, fn {object, attrs} ->
+      Boards.update_board_object(object, attrs)
+    end)
+
+    socket =
+      if previous_snapshots == [] do
+        socket
+      else
+        broadcast_board_objects_changed(socket)
+
+        socket
+        |> push_undo({:restore_existing_objects, previous_snapshots})
+        |> reload_board_objects()
+      end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("move_objects", _params, socket), do: {:noreply, socket}
+
+  @impl true
   def handle_event("move_object", %{"id" => id, "x" => x, "y" => y}, socket) do
     object = Boards.get_board_object!(id)
 
@@ -689,7 +738,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             <svg
               id="drawing-layer"
               phx-update="ignore"
-              class="pointer-events-none absolute inset-0 z-[1] h-full w-full"
+              class="pointer-events-none absolute inset-0 z-[90000] h-full w-full"
             ></svg>
             <svg
               id="shape-preview-layer"
@@ -719,8 +768,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-value-tool="cursor"
                     class={toolbar_button_class(@selected_tool == "cursor")}
                     title="Cursor / selection"
+                    aria-label="Cursor and selection"
                   >
-                    ↖
+                    <.icon name="hero-cursor-arrow-rays" class="size-5" />
                   </button>
 
                   <button
@@ -729,8 +779,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-value-tool="sticky"
                     class={toolbar_button_class(@selected_tool == "sticky")}
                     title="Sticky note"
+                    aria-label="Create sticky note"
                   >
-                    ◰
+                    <.icon name="hero-chat-bubble-left-ellipsis" class="size-5" />
                   </button>
 
                   <button
@@ -739,8 +790,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-value-kind="text"
                     class={toolbar_button_class(@selected_tool == "text")}
                     title="Text"
+                    aria-label="Create text"
                   >
-                    T
+                    <.icon name="hero-bars-3-bottom-left" class="size-5" />
                   </button>
 
                   <button
@@ -749,8 +801,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-value-tool="rectangle"
                     class={toolbar_button_class(@selected_tool == "rectangle")}
                     title="Rectangle"
+                    aria-label="Draw rectangle"
                   >
-                    □
+                    <.icon name="hero-stop" class="size-5" />
                   </button>
 
                   <button
@@ -759,8 +812,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-value-tool="rounded_rectangle"
                     class={toolbar_button_class(@selected_tool == "rounded_rectangle")}
                     title="Rounded rectangle"
+                    aria-label="Draw rounded rectangle"
                   >
-                    ▢
+                    <.icon name="hero-rectangle-stack" class="size-5" />
                   </button>
 
                   <button
@@ -769,8 +823,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-value-tool="ellipse"
                     class={toolbar_button_class(@selected_tool == "ellipse")}
                     title="Circle / ellipse"
+                    aria-label="Draw ellipse"
                   >
-                    ○
+                    <.icon name="hero-circle-stack" class="size-5" />
                   </button>
 
                   <button
@@ -779,8 +834,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-value-tool="triangle"
                     class={toolbar_button_class(@selected_tool == "triangle")}
                     title="Triangle"
+                    aria-label="Draw triangle"
                   >
-                    △
+                    <.icon name="hero-play" class="size-5 -rotate-90" />
                   </button>
 
                   <button
@@ -789,8 +845,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-value-tool="line"
                     class={toolbar_button_class(@selected_tool == "line")}
                     title="Line"
+                    aria-label="Draw line"
                   >
-                    ╱
+                    <.icon name="hero-minus" class="size-5 -rotate-45" />
                   </button>
 
                   <button
@@ -799,8 +856,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-value-tool="arrow"
                     class={toolbar_button_class(@selected_tool == "arrow")}
                     title="Arrow"
+                    aria-label="Draw arrow"
                   >
-                    ↗
+                    <.icon name="hero-arrow-up-right" class="size-5" />
                   </button>
 
                   <button
@@ -809,8 +867,15 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-value-tool="draw"
                     class={toolbar_button_class(@selected_tool == "draw")}
                     title="Draw"
+                    aria-label="Pencil and color"
                   >
-                    ✎
+                    <span class="relative">
+                      <.icon name="hero-pencil" class="size-5" />
+                      <span
+                        class="absolute -bottom-1 -right-1 size-2.5 rounded-full border border-white"
+                        style={"background-color: #{drawing_color_hex(@selected_color)}"}
+                      ></span>
+                    </span>
                   </button>
 
                   <button
@@ -819,8 +884,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
                     phx-value-tool="eraser"
                     class={toolbar_button_class(@selected_tool == "eraser")}
                     title="Eraser"
+                    aria-label="Eraser"
                   >
-                    ⌫
+                    <.icon name="hero-backspace" class="size-5" />
                   </button>
                 </div>
               </div>
@@ -832,10 +898,38 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   phx-value-tool="pan"
                   class={toolbar_button_class(@selected_tool == "pan")}
                   title="Pan mode"
+                  aria-label="Pan board"
                 >
-                  ✥
+                  <.icon name="hero-hand-raised" class="size-5" />
                 </button>
               </div>
+
+              <%= if @selected_tool == "draw" do %>
+                <div
+                  id="pencil-color-palette"
+                  class="grid grid-cols-3 gap-2 rounded-xl border border-slate-200 bg-white p-2 shadow-xl"
+                  aria-label="Pencil color"
+                >
+                  <%= for color <- @available_colors do %>
+                    <button
+                      id={"pencil-color-#{color}"}
+                      type="button"
+                      phx-click="select_color"
+                      phx-value-color={color}
+                      class={[
+                        "size-7 rounded-full border-2 transition hover:scale-110 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2",
+                        if(@selected_color == color,
+                          do: "border-slate-950 ring-2 ring-slate-300",
+                          else: "border-white"
+                        )
+                      ]}
+                      style={"background-color: #{drawing_color_hex(color)}"}
+                      title={"Pencil color: #{color}"}
+                      aria-label={"Use #{color} pencil"}
+                    ></button>
+                  <% end %>
+                </div>
+              <% end %>
             </div>
 
             <%= if @selected_tool == "sticky" do %>
@@ -1202,7 +1296,10 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   defp clean_connect_param(_value, fallback), do: fallback
 
-  defp clean_color("#" <> hex = color) when byte_size(hex) == 6, do: color
+  defp clean_color("#" <> hex = color) when byte_size(hex) == 6 do
+    if Regex.match?(~r/\A[0-9a-fA-F]{6}\z/, hex), do: color, else: "#f97316"
+  end
+
   defp clean_color(_value), do: "#f97316"
 
   defp fallback_guest_id do
