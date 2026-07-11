@@ -190,7 +190,7 @@ defmodule OpenBoard.Boards do
 
   defp generate_unique_slug do
     slug =
-      5
+      16
       |> :crypto.strong_rand_bytes()
       |> Base.url_encode64(padding: false)
       |> String.downcase()

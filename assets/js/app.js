@@ -667,11 +667,6 @@ Hooks.BoardSurface = {
         return
       }
 
-      if (isBoardObject) {
-        this.startPanning(event)
-        return
-      }
-
       if (this.selectedTool === "draw") {
         this.clearSelectedObjects()
         this.startDrawing(event)
@@ -687,6 +682,11 @@ Hooks.BoardSurface = {
       if (SHAPE_TOOLS.has(this.selectedTool)) {
         this.clearSelectedObjects()
         this.startShapeDrawing(event)
+        return
+      }
+
+      if (isBoardObject) {
+        this.startPanning(event)
         return
       }
 
@@ -1097,6 +1097,16 @@ Hooks.BoardSurface = {
     })
 
     return Array.from(selectedIds)
+  },
+
+  isObjectSelected(objectId) {
+    return this.currentSelectedObjectIds().includes(`${objectId}`)
+  },
+
+  selectedObjectElements() {
+    return this.currentSelectedObjectIds()
+      .map((objectId) => document.getElementById(`board-object-${objectId}`))
+      .filter(Boolean)
   },
 
   rememberClipboardObjectIds(objectIds) {
@@ -1580,7 +1590,7 @@ Hooks.BoardSurface = {
       return null
     }
 
-    return this.drawingLayer.querySelector(`path[data-stroke-id="${strokeId}"]`)
+    return this.remoteStrokes.get(strokeId) || null
   },
 
   removeStroke(strokeId) {
@@ -1612,27 +1622,16 @@ Hooks.BoardSurface = {
       cursorElement.className = "absolute pointer-events-none transition-transform duration-75 ease-linear"
       cursorElement.dataset.userId = cursor.user_id
 
-      cursorElement.innerHTML = `
-        <div style="
-          width: 0;
-          height: 0;
-          border-left: 8px solid transparent;
-          border-right: 8px solid transparent;
-          border-top: 14px solid ${cursor.color};
-          transform: rotate(-35deg);
-        "></div>
-        <div style="
-          margin-top: 4px;
-          border-radius: 6px;
-          padding: 4px 8px;
-          background: ${cursor.color};
-          color: white;
-          font-size: 12px;
-          font-weight: 700;
-          box-shadow: 0 10px 15px rgba(0, 0, 0, 0.25);
-          white-space: nowrap;
-        ">${cursor.name}</div>
-      `
+      const pointer = document.createElement("div")
+      pointer.className = "h-0 w-0 rotate-[-35deg] border-x-[8px] border-t-[14px] border-x-transparent"
+      pointer.style.borderTopColor = cursor.color
+
+      const label = document.createElement("div")
+      label.className = "mt-1 whitespace-nowrap rounded-md px-2 py-1 text-xs font-bold text-white shadow-lg"
+      label.style.backgroundColor = cursor.color
+      label.textContent = cursor.name
+
+      cursorElement.append(pointer, label)
 
       this.cursorLayer.appendChild(cursorElement)
       this.remoteCursors.set(cursor.user_id, cursorElement)
@@ -1686,6 +1685,9 @@ Hooks.BoardObjectWindow = {
     this.startY = 0
     this.startWidth = 0
     this.startHeight = 0
+    this.groupDragElements = []
+    this.groupDragStartRects = new Map()
+    this.isGroupDrag = false
     this.hasMoved = false
 
     this.onPointerMoveHover = (event) => {
@@ -1741,12 +1743,37 @@ Hooks.BoardObjectWindow = {
 
       event.preventDefault()
 
-      surface.selectObject(this.el.dataset.objectId, this.el, event.shiftKey)
+      const objectId = this.el.dataset.objectId
+      const selectedBeforePointerDown = surface.currentSelectedObjectIds()
+      const shouldKeepGroupSelection =
+        !event.shiftKey && selectedBeforePointerDown.length > 1 && selectedBeforePointerDown.includes(`${objectId}`)
 
-      this.el.style.transition = "none"
+      if (shouldKeepGroupSelection) {
+        surface.reapplySelectionOutline()
+      } else {
+        surface.selectObject(objectId, this.el, event.shiftKey)
+      }
+
+      this.isGroupDrag = this.mode === "drag" && surface.currentSelectedObjectIds().length > 1
+      this.groupDragElements = this.isGroupDrag ? surface.selectedObjectElements() : []
+      this.groupDragStartRects = new Map()
+
+      if (this.isGroupDrag) {
+        for (const element of this.groupDragElements) {
+          this.groupDragStartRects.set(element.dataset.objectId, {
+            element: element,
+            x: parseFloat(element.style.left || "0"),
+            y: parseFloat(element.style.top || "0")
+          })
+
+          element.style.transition = "none"
+        }
+      } else {
+        this.el.style.transition = "none"
+      }
 
       this.pushEvent("bring_to_front", {
-        id: this.el.dataset.objectId
+        id: objectId
       })
 
       document.addEventListener("pointermove", this.onDocumentPointerMove)
@@ -1769,6 +1796,18 @@ Hooks.BoardObjectWindow = {
       }
 
       if (this.mode === "drag") {
+        if (this.isGroupDrag) {
+          for (const startRect of this.groupDragStartRects.values()) {
+            const nextX = clamp(startRect.x + delta.x, 0)
+            const nextY = clamp(startRect.y + delta.y, 0)
+
+            startRect.element.style.left = `${nextX}px`
+            startRect.element.style.top = `${nextY}px`
+          }
+
+          return
+        }
+
         const nextX = clamp(this.startX + delta.x, 0)
         const nextY = clamp(this.startY + delta.y, 0)
 
@@ -1848,7 +1887,13 @@ Hooks.BoardObjectWindow = {
       document.removeEventListener("pointermove", this.onDocumentPointerMove)
       document.removeEventListener("pointerup", this.onDocumentPointerUp)
 
-      this.el.style.transition = ""
+      if (this.isGroupDrag) {
+        for (const startRect of this.groupDragStartRects.values()) {
+          startRect.element.style.transition = ""
+        }
+      } else {
+        this.el.style.transition = ""
+      }
 
       const x = parseFloat(this.el.style.left || "0")
       const y = parseFloat(this.el.style.top || "0")
@@ -1856,16 +1901,41 @@ Hooks.BoardObjectWindow = {
       const height = parseFloat(this.el.style.height || "0")
 
       if (!this.hasMoved) {
+        this.isGroupDrag = false
+        this.groupDragElements = []
+        this.groupDragStartRects = new Map()
         return
       }
 
       if (mode === "resize") {
+        this.isGroupDrag = false
+        this.groupDragElements = []
+        this.groupDragStartRects = new Map()
+
         this.pushEvent("resize_object", {
           id: this.el.dataset.objectId,
           x: x,
           y: y,
           width: width,
           height: height
+        })
+
+        return
+      }
+
+      if (this.isGroupDrag) {
+        const movedObjects = this.groupDragElements.map((element) => ({
+          id: element.dataset.objectId,
+          x: parseFloat(element.style.left || "0"),
+          y: parseFloat(element.style.top || "0")
+        }))
+
+        this.isGroupDrag = false
+        this.groupDragElements = []
+        this.groupDragStartRects = new Map()
+
+        this.pushEvent("move_objects", {
+          objects: movedObjects
         })
 
         return
