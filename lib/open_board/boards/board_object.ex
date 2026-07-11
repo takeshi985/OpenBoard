@@ -33,6 +33,7 @@ defmodule OpenBoard.Boards.BoardObject do
     field :stroke_color, :string, default: "#0f172a"
     field :fill_color, :string, default: "transparent"
     field :stroke_width, :integer, default: 2
+    field :erasures, :map, default: %{"marks" => []}
 
     belongs_to :board, Board
 
@@ -55,7 +56,8 @@ defmodule OpenBoard.Boards.BoardObject do
       :rotation,
       :stroke_color,
       :fill_color,
-      :stroke_width
+      :stroke_width,
+      :erasures
     ])
     |> validate_required([:board_id, :kind, :x, :y, :width, :height])
     |> validate_inclusion(:kind, @allowed_kinds)

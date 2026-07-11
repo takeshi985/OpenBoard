@@ -37,7 +37,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
     "ellipse",
     "triangle",
     "draw",
-    "eraser"
+    "object_eraser",
+    "pixel_eraser"
   ]
 
   @shape_tools ["line", "arrow", "rectangle", "rounded_rectangle", "ellipse", "triangle"]
@@ -79,6 +80,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
           |> assign(:online_users, list_online_users(topic))
           |> assign(:selected_color, "yellow")
           |> assign(:selected_tool, "pan")
+          |> assign(:pencil_palette_open, false)
+          |> assign(:sticky_palette_open, false)
           |> assign(:available_colors, @colors)
           |> assign(:workspace_width, @workspace_width)
           |> assign(:workspace_height, @workspace_height)
@@ -97,12 +100,38 @@ defmodule OpenBoardWeb.BoardLive.Show do
         "cursor"
       end
 
-    {:noreply, assign(socket, :selected_tool, next_tool)}
+    {:noreply,
+     socket
+     |> assign(:selected_tool, next_tool)
+     |> assign(:pencil_palette_open, false)
+     |> assign(:sticky_palette_open, false)}
+  end
+
+  @impl true
+  def handle_event("select_tool", %{"tool" => "draw"}, socket) do
+    {:noreply,
+     socket
+     |> assign(:selected_tool, "draw")
+     |> assign(:pencil_palette_open, true)
+     |> assign(:sticky_palette_open, false)}
+  end
+
+  @impl true
+  def handle_event("select_tool", %{"tool" => "sticky"}, socket) do
+    {:noreply,
+     socket
+     |> assign(:selected_tool, "sticky")
+     |> assign(:pencil_palette_open, false)
+     |> assign(:sticky_palette_open, true)}
   end
 
   @impl true
   def handle_event("select_tool", %{"tool" => tool}, socket) when tool in @tools do
-    {:noreply, assign(socket, :selected_tool, tool)}
+    {:noreply,
+     socket
+     |> assign(:selected_tool, tool)
+     |> assign(:pencil_palette_open, false)
+     |> assign(:sticky_palette_open, false)}
   end
 
   @impl true
@@ -110,24 +139,50 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   @impl true
   def handle_event("select_color", %{"color" => color}, socket) when color in @colors do
-    {:noreply, assign(socket, :selected_color, color)}
+    {:noreply,
+     socket
+     |> assign(:selected_color, color)
+     |> assign(:pencil_palette_open, false)}
   end
 
   @impl true
   def handle_event("select_color", _params, socket), do: {:noreply, socket}
 
   @impl true
+  def handle_event("select_custom_color", %{"color" => color}, socket) do
+    case clean_hex_color(color) do
+      {:ok, color} ->
+        {:noreply,
+         socket
+         |> assign(:selected_color, color)
+         |> assign(:pencil_palette_open, false)}
+
+      :error ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
   def handle_event("create_sticky", %{"color" => color}, socket) when color in @colors do
+    {:noreply,
+     socket
+     |> assign(:selected_color, color)
+     |> assign(:sticky_palette_open, false)
+     |> push_event("sticky_ghost_started", %{color: sticky_color_hex(color)})}
+  end
+
+  @impl true
+  def handle_event("create_sticky_at", %{"x" => x, "y" => y}, socket) do
     board = socket.assigns.board
-    count = Enum.count(socket.assigns.board_objects)
+    color = socket.assigns.selected_color
 
     attrs = %{
       board_id: board.id,
       kind: "sticky",
       text: "New sticky note",
       color: color,
-      x: @workspace_width / 2 + count * 28,
-      y: @workspace_height / 2 + count * 24,
+      x: clamp_number(number_param(%{"x" => x}, "x", 0.0), 0.0, @workspace_width - 240.0),
+      y: clamp_number(number_param(%{"y" => y}, "y", 0.0), 0.0, @workspace_height - 150.0),
       width: 240.0,
       height: 150.0,
       z_index: Boards.next_regular_z_index(board.id),
@@ -145,8 +200,9 @@ defmodule OpenBoardWeb.BoardLive.Show do
         socket =
           socket
           |> push_undo({:delete_objects, [object.id]})
-          |> assign(:selected_color, color)
           |> assign(:selected_tool, "pan")
+          |> assign(:sticky_palette_open, false)
+          |> push_event("sticky_ghost_finished", %{})
           |> reload_board_objects()
 
         {:noreply, socket}
@@ -158,6 +214,16 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   @impl true
   def handle_event("create_sticky", _params, socket), do: {:noreply, socket}
+
+  @impl true
+  def handle_event("cancel_placement", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:selected_tool, "pan")
+     |> assign(:pencil_palette_open, false)
+     |> assign(:sticky_palette_open, false)
+     |> push_event("sticky_ghost_finished", %{})}
+  end
 
   @impl true
   def handle_event("create_object", %{"kind" => kind}, socket) do
@@ -281,6 +347,59 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   @impl true
   def handle_event("delete_objects", _params, socket), do: {:noreply, socket}
+
+  @impl true
+  def handle_event("erase_object_pixels", %{"objects" => erase_requests}, socket)
+      when is_list(erase_requests) do
+    board = socket.assigns.board
+
+    updates =
+      erase_requests
+      |> Enum.take(100)
+      |> Enum.reduce([], fn request, updates ->
+        with %{"id" => id, "marks" => marks} <- request,
+             true <- is_list(marks),
+             {:ok, object} <- safe_get_board_object(id),
+             true <- object.board_id == board.id,
+             true <- shape_object?(object) do
+          sanitized_marks = sanitize_eraser_marks(marks, object)
+
+          if sanitized_marks == [] do
+            updates
+          else
+            existing_marks = eraser_marks(object)
+            erasures = %{"marks" => Enum.take(existing_marks ++ sanitized_marks, -2_000)}
+            [{object, erasures} | updates]
+          end
+        else
+          _other -> updates
+        end
+      end)
+      |> Enum.reverse()
+
+    previous_snapshots =
+      Enum.map(updates, fn {object, _erasures} -> existing_object_snapshot(object) end)
+
+    Enum.each(updates, fn {object, erasures} ->
+      Boards.update_board_object(object, %{erasures: erasures})
+    end)
+
+    socket =
+      if updates == [] do
+        socket
+      else
+        broadcast_board_objects_changed(socket)
+
+        socket
+        |> push_undo({:restore_existing_objects, previous_snapshots})
+        |> reload_board_objects()
+      end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("erase_object_pixels", _params, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("paste_objects", %{"ids" => ids}, socket) when is_list(ids) do
@@ -881,12 +1000,23 @@ defmodule OpenBoardWeb.BoardLive.Show do
                   <button
                     type="button"
                     phx-click="select_tool"
-                    phx-value-tool="eraser"
-                    class={toolbar_button_class(@selected_tool == "eraser")}
-                    title="Eraser"
-                    aria-label="Eraser"
+                    phx-value-tool="object_eraser"
+                    class={toolbar_button_class(@selected_tool == "object_eraser")}
+                    title="Object eraser"
+                    aria-label="Erase whole object"
                   >
                     <.icon name="hero-backspace" class="size-5" />
+                  </button>
+
+                  <button
+                    type="button"
+                    phx-click="select_tool"
+                    phx-value-tool="pixel_eraser"
+                    class={toolbar_button_class(@selected_tool == "pixel_eraser")}
+                    title="Pixel eraser"
+                    aria-label="Erase part of drawing"
+                  >
+                    <.icon name="hero-sparkles" class="size-5" />
                   </button>
                 </div>
               </div>
@@ -904,39 +1034,65 @@ defmodule OpenBoardWeb.BoardLive.Show do
                 </button>
               </div>
 
-              <%= if @selected_tool == "draw" do %>
+              <%= if @pencil_palette_open do %>
                 <div
                   id="pencil-color-palette"
-                  class="grid grid-cols-3 gap-2 rounded-xl border border-slate-200 bg-white p-2 shadow-xl"
+                  class="absolute left-14 top-[9.5rem] w-56 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl"
                   aria-label="Pencil color"
                 >
-                  <%= for color <- @available_colors do %>
-                    <button
-                      id={"pencil-color-#{color}"}
-                      type="button"
-                      phx-click="select_color"
-                      phx-value-color={color}
-                      class={[
-                        "size-7 rounded-full border-2 transition hover:scale-110 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2",
-                        if(@selected_color == color,
-                          do: "border-slate-950 ring-2 ring-slate-300",
-                          else: "border-white"
-                        )
-                      ]}
-                      style={"background-color: #{drawing_color_hex(color)}"}
-                      title={"Pencil color: #{color}"}
-                      aria-label={"Use #{color} pencil"}
-                    ></button>
-                  <% end %>
+                  <div class="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+                    Pencil color
+                  </div>
+                  <div class="grid grid-cols-5 gap-2">
+                    <%= for color <- @available_colors do %>
+                      <button
+                        id={"pencil-color-#{color}"}
+                        type="button"
+                        phx-click="select_color"
+                        phx-value-color={color}
+                        class={[
+                          "size-7 rounded-full border-2 transition hover:scale-110 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2",
+                          if(@selected_color == color,
+                            do: "border-slate-950 ring-2 ring-slate-300",
+                            else: "border-white"
+                          )
+                        ]}
+                        style={"background-color: #{drawing_color_hex(color)}"}
+                        title={"Pencil color: #{color}"}
+                        aria-label={"Use #{color} pencil"}
+                      ></button>
+                    <% end %>
+                  </div>
+
+                  <form
+                    id="custom-pencil-color-form"
+                    phx-change="select_custom_color"
+                    class="mt-3 border-t border-slate-200 pt-3"
+                  >
+                    <label
+                      for="custom-pencil-color"
+                      class="flex cursor-pointer items-center justify-between gap-3 text-sm font-semibold text-slate-700"
+                    >
+                      Any RGB color
+                      <input
+                        id="custom-pencil-color"
+                        name="color"
+                        type="color"
+                        value={drawing_color_hex(@selected_color)}
+                        class="h-9 w-16 cursor-pointer rounded-lg border border-slate-300 bg-white p-1"
+                      />
+                    </label>
+                  </form>
                 </div>
               <% end %>
             </div>
 
-            <%= if @selected_tool == "sticky" do %>
+            <%= if @sticky_palette_open do %>
               <div class="absolute left-20 top-20 z-[120001] w-[154px] rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
                 <div class="grid grid-cols-2 gap-2">
                   <%= for color <- sticky_palette_colors() do %>
                     <button
+                      id={"sticky-color-#{color}"}
                       type="button"
                       phx-click="create_sticky"
                       phx-value-color={color}
@@ -1051,6 +1207,27 @@ defmodule OpenBoardWeb.BoardLive.Show do
         viewBox={"0 0 #{@object.width} #{@object.height}"}
         preserveAspectRatio="none"
       >
+        <defs>
+          <mask
+            id={"eraser-mask-#{@object.id}"}
+            data-eraser-mask
+            maskUnits="userSpaceOnUse"
+            x="0"
+            y="0"
+            width={@object.width}
+            height={@object.height}
+          >
+            <rect x="0" y="0" width={@object.width} height={@object.height} fill="white" />
+            <circle
+              :for={mark <- eraser_marks(@object)}
+              cx={mark["x"]}
+              cy={mark["y"]}
+              r={mark["radius"]}
+              fill="black"
+            />
+          </mask>
+        </defs>
+
         <%= if @object.kind == "arrow" do %>
           <defs>
             <marker
@@ -1076,6 +1253,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             stroke-width={@object.stroke_width}
             stroke-linecap="round"
             stroke-linejoin="round"
+            mask={eraser_mask_url(@object)}
           />
         <% end %>
 
@@ -1090,6 +1268,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             stroke-linecap="round"
             vector-effect="non-scaling-stroke"
             marker-end={if @object.kind == "arrow", do: "url(#arrowhead-#{@object.id})", else: nil}
+            mask={eraser_mask_url(@object)}
           />
         <% end %>
 
@@ -1103,6 +1282,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             stroke={@object.stroke_color}
             stroke-width={@object.stroke_width}
             vector-effect="non-scaling-stroke"
+            mask={eraser_mask_url(@object)}
           />
         <% end %>
 
@@ -1118,6 +1298,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             stroke={@object.stroke_color}
             stroke-width={@object.stroke_width}
             vector-effect="non-scaling-stroke"
+            mask={eraser_mask_url(@object)}
           />
         <% end %>
 
@@ -1131,6 +1312,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             stroke={@object.stroke_color}
             stroke-width={@object.stroke_width}
             vector-effect="non-scaling-stroke"
+            mask={eraser_mask_url(@object)}
           />
         <% end %>
 
@@ -1142,6 +1324,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
             stroke-width={@object.stroke_width}
             stroke-linejoin="round"
             vector-effect="non-scaling-stroke"
+            mask={eraser_mask_url(@object)}
           />
         <% end %>
       </svg>
@@ -1213,7 +1396,7 @@ defmodule OpenBoardWeb.BoardLive.Show do
     assign(socket, :board_objects, Boards.list_board_objects(socket.assigns.board))
   end
 
-  defp load_or_seed_demo_objects(board) do
+  defp load_or_seed_demo_objects(%{slug: "demo"} = board) do
     case Boards.list_board_objects(board) do
       [] ->
         {:ok, _first} =
@@ -1240,6 +1423,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
         objects
     end
   end
+
+  defp load_or_seed_demo_objects(board), do: Boards.list_board_objects(board)
 
   defp broadcast_board_objects_changed(socket) do
     Phoenix.PubSub.broadcast(
@@ -1371,7 +1556,10 @@ defmodule OpenBoardWeb.BoardLive.Show do
   defp drawing_color_hex("teal"), do: "#5eead4"
   defp drawing_color_hex("lime"), do: "#bef264"
   defp drawing_color_hex("black"), do: "#0f172a"
+  defp drawing_color_hex("#" <> hex = color) when byte_size(hex) == 6, do: color
   defp drawing_color_hex(_), do: "#fde047"
+
+  defp sticky_color_hex(color), do: drawing_color_hex(color)
 
   defp toolbar_button_class(true) do
     "flex h-9 w-9 items-center justify-center rounded-lg bg-slate-900 text-lg font-bold text-white shadow-sm"
@@ -1424,6 +1612,11 @@ defmodule OpenBoardWeb.BoardLive.Show do
       "freehand"
     ]
   end
+
+  defp eraser_marks(%{erasures: %{"marks" => marks}}) when is_list(marks), do: marks
+  defp eraser_marks(_object), do: []
+
+  defp eraser_mask_url(object), do: "url(#eraser-mask-#{object.id})"
 
   defp shape_style(%{kind: kind} = object) when kind in ["line", "arrow"] do
     "left: #{object.x}px; top: #{object.y}px; width: #{object.width}px; height: #{object.height}px; z-index: #{object.z_index}; transform: rotate(#{object.rotation || 0}deg); transform-origin: 0px 50%;"
@@ -1489,7 +1682,8 @@ defmodule OpenBoardWeb.BoardLive.Show do
       rotation: object.rotation,
       stroke_color: object.stroke_color,
       fill_color: object.fill_color,
-      stroke_width: object.stroke_width
+      stroke_width: object.stroke_width,
+      erasures: object.erasures
     }
   end
 
@@ -1541,7 +1735,37 @@ defmodule OpenBoardWeb.BoardLive.Show do
   defp safe_get_board_object(id) do
     {:ok, Boards.get_board_object!(id)}
   rescue
-    Ecto.NoResultsError -> :error
+    error in [Ecto.NoResultsError, Ecto.Query.CastError] ->
+      _error = error
+      :error
+  end
+
+  defp sanitize_eraser_marks(marks, object) do
+    marks
+    |> Enum.take(500)
+    |> Enum.reduce([], fn mark, sanitized ->
+      if is_map(mark) do
+        x = number_param(mark, "x", -1.0)
+        y = number_param(mark, "y", -1.0)
+        radius = clamp_number(number_param(mark, "radius", 18.0), 1.0, 100.0)
+
+        if x >= 0 and x <= object.width and y >= 0 and y <= object.height do
+          [
+            %{
+              "x" => Float.round(x, 2),
+              "y" => Float.round(y, 2),
+              "radius" => Float.round(radius, 2)
+            }
+            | sanitized
+          ]
+        else
+          sanitized
+        end
+      else
+        sanitized
+      end
+    end)
+    |> Enum.reverse()
   end
 
   defp freehand_object_attrs(params, socket) do
@@ -1601,8 +1825,17 @@ defmodule OpenBoardWeb.BoardLive.Show do
 
   defp parse_float(value, fallback) do
     case Float.parse(value) do
-      {number, _rest} -> number
+      {number, ""} -> number
       :error -> fallback
+      {_number, _rest} -> fallback
     end
   end
+
+  defp clamp_number(value, minimum, maximum), do: min(maximum, max(minimum, value))
+
+  defp clean_hex_color("#" <> hex = color) when byte_size(hex) == 6 do
+    if Regex.match?(~r/\A[0-9a-fA-F]{6}\z/, hex), do: {:ok, color}, else: :error
+  end
+
+  defp clean_hex_color(_color), do: :error
 end

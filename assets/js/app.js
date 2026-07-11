@@ -14,12 +14,14 @@ const CURSOR_SEND_INTERVAL = 33
 const DRAW_SEND_INTERVAL = 16
 const ERASER_SEND_INTERVAL = 24
 const ERASER_RADIUS = 18
+const MAX_ERASER_SAMPLES = 96
 const MIN_DRAW_POINT_DISTANCE = 0.5
 const STAIR_SMOOTHING_SCREEN_EPSILON = 1.8
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 2.5
 const MARQUEE_MIN_SIZE = 4
 const OBJECT_CLIPBOARD_KEY = "open_board_clipboard_object_ids"
+const pathSampleCache = new WeakMap()
 
 const SHAPE_TOOLS = new Set([
   "line",
@@ -261,18 +263,46 @@ function appendSvgPoint(path, x, y) {
 
 function isPointNearPath(point, path, radius) {
   try {
+    const bounds = path.getBBox()
+
+    if (
+      point.x < bounds.x - radius ||
+      point.x > bounds.x + bounds.width + radius ||
+      point.y < bounds.y - radius ||
+      point.y > bounds.y + bounds.height + radius
+    ) {
+      return false
+    }
+
+    const signature = path.getAttribute("d") || ""
+    const cached = pathSampleCache.get(path)
+
+    if (cached && cached.signature === signature) {
+      const radiusSquared = radius * radius
+      return cached.points.some((pathPoint) => {
+        const dx = point.x - pathPoint.x
+        const dy = point.y - pathPoint.y
+        return dx * dx + dy * dy <= radiusSquared
+      })
+    }
+
     const length = path.getTotalLength()
-    const samples = Math.max(12, Math.ceil(length / 10))
+    const samples = Math.min(MAX_ERASER_SAMPLES, Math.max(12, Math.ceil(length / 14)))
+    const sampledPoints = []
 
     for (let index = 0; index <= samples; index += 1) {
       const pathPoint = path.getPointAtLength((length * index) / samples)
-
-      if (distanceBetween(point, { x: pathPoint.x, y: pathPoint.y }) <= radius) {
-        return true
-      }
+      sampledPoints.push({ x: pathPoint.x, y: pathPoint.y })
     }
 
-    return false
+    pathSampleCache.set(path, { signature, points: sampledPoints })
+    const radiusSquared = radius * radius
+
+    return sampledPoints.some((pathPoint) => {
+      const dx = point.x - pathPoint.x
+      const dy = point.y - pathPoint.y
+      return dx * dx + dy * dy <= radiusSquared
+    })
   } catch (_error) {
     return false
   }
@@ -534,6 +564,9 @@ Hooks.BoardSurface = {
     this.selectedObjectIds = new Set()
     this.clipboardObjectIds = []
     this.selectionBox = document.getElementById("selection-box")
+    this.stickyGhost = null
+    this.wholeEraseObjectIds = new Set()
+    this.pixelEraseChanges = new Map()
 
     this.lastCursorSentAt = 0
     this.lastDrawSentAt = 0
@@ -581,6 +614,16 @@ Hooks.BoardSurface = {
         tagName === "input" || tagName === "textarea" || Boolean(event.target && event.target.isContentEditable)
       const isCommandKey = event.ctrlKey || event.metaKey
       const key = event.key.toLowerCase()
+
+      if (event.key === "Escape") {
+        if (this.stickyGhost || this.selectedTool === "sticky") {
+          event.preventDefault()
+          this.removeStickyGhost()
+          this.pushEvent("cancel_placement", {})
+        }
+
+        return
+      }
 
       if (isCommandKey && key === "a") {
         event.preventDefault()
@@ -631,6 +674,7 @@ Hooks.BoardSurface = {
 
     this.onPointerMove = (event) => {
       this.sendCursorMove(event)
+      this.positionStickyGhost(event)
 
       if (this.isDrawing) {
         this.addLocalDrawingPoint(event)
@@ -673,9 +717,14 @@ Hooks.BoardSurface = {
         return
       }
 
-      if (this.selectedTool === "eraser") {
+      if (this.selectedTool === "object_eraser" || this.selectedTool === "pixel_eraser") {
         this.clearSelectedObjects()
         this.startErasing(event)
+        return
+      }
+
+      if (this.selectedTool === "sticky" && this.stickyGhost) {
+        this.placeStickyAtPointer(event)
         return
       }
 
@@ -752,6 +801,14 @@ Hooks.BoardSurface = {
       window.setTimeout(() => {
         this.selectObjects(pastedIds)
       }, 0)
+    })
+
+    this.handleEvent("sticky_ghost_started", ({ color }) => {
+      this.createStickyGhost(color)
+    })
+
+    this.handleEvent("sticky_ghost_finished", () => {
+      this.removeStickyGhost()
     })
 
     this.handleEvent("remote_drawing_started", (drawing) => {
@@ -838,6 +895,8 @@ Hooks.BoardSurface = {
     if (this.onDocumentPointerUp) {
       document.removeEventListener("pointerup", this.onDocumentPointerUp)
     }
+
+    this.removeStickyGhost()
   },
 
   updateDatasetState() {
@@ -848,12 +907,68 @@ Hooks.BoardSurface = {
       this.el.style.cursor = "default"
     } else if (this.selectedTool === "draw") {
       this.el.style.cursor = "crosshair"
-    } else if (this.selectedTool === "eraser") {
+    } else if (this.selectedTool === "object_eraser") {
       this.el.style.cursor = "cell"
+    } else if (this.selectedTool === "pixel_eraser") {
+      this.el.style.cursor = "crosshair"
     } else if (SHAPE_TOOLS.has(this.selectedTool)) {
       this.el.style.cursor = "crosshair"
     } else {
       this.el.style.cursor = "grab"
+    }
+  },
+
+  createStickyGhost(color) {
+    this.removeStickyGhost()
+
+    const ghost = document.createElement("div")
+    ghost.id = "sticky-note-ghost"
+    ghost.className =
+      "pointer-events-none absolute z-[110000] h-[150px] w-[240px] rounded-xl border-2 border-dashed border-slate-700/50 p-4 text-sm font-semibold text-slate-700 shadow-2xl opacity-75"
+    ghost.style.backgroundColor = color
+    ghost.textContent = "Click to place sticky note · Esc to cancel"
+    ghost.style.left = `${Math.max((this.el.clientWidth - 240) / 2, 0)}px`
+    ghost.style.top = `${Math.max((this.el.clientHeight - 150) / 2, 0)}px`
+
+    this.el.appendChild(ghost)
+    this.stickyGhost = ghost
+    this.updateDatasetState()
+  },
+
+  positionStickyGhost(event) {
+    if (!this.stickyGhost) {
+      return
+    }
+
+    const rect = this.el.getBoundingClientRect()
+    const left = clampBetween(event.clientX - rect.left + 18, 0, Math.max(this.el.clientWidth - 240, 0))
+    const top = clampBetween(event.clientY - rect.top + 18, 0, Math.max(this.el.clientHeight - 150, 0))
+
+    this.stickyGhost.style.left = `${left}px`
+    this.stickyGhost.style.top = `${top}px`
+  },
+
+  placeStickyAtPointer(event) {
+    event.preventDefault()
+
+    const point = this.screenToBoardPoint(event)
+
+    if (!this.isPointInside(point)) {
+      return
+    }
+
+    this.pushEvent("create_sticky_at", {
+      x: point.x - 120,
+      y: point.y - 75
+    })
+
+    this.removeStickyGhost()
+  },
+
+  removeStickyGhost() {
+    if (this.stickyGhost) {
+      this.stickyGhost.remove()
+      this.stickyGhost = null
     }
   },
 
@@ -1511,6 +1626,8 @@ Hooks.BoardSurface = {
     event.preventDefault()
 
     this.isErasing = true
+    this.wholeEraseObjectIds = new Set()
+    this.pixelEraseChanges = new Map()
     this.eraseAtPointer(event)
 
     document.addEventListener("pointermove", this.onDocumentPointerMove)
@@ -1526,53 +1643,108 @@ Hooks.BoardSurface = {
 
     this.lastEraseSentAt = now
 
-    const point = this.screenToBoardPoint(event)
+    this.ensureClientLayers()
 
-    if (!this.isPointInside(point)) {
+    if (this.selectedTool === "object_eraser") {
+      this.eraseWholeObjectAtPointer(event)
+    } else if (this.selectedTool === "pixel_eraser") {
+      this.erasePixelsAtPointer(event)
+    }
+  },
+
+  drawingObjectElements() {
+    return Array.from(
+      document.querySelectorAll(
+        '[data-board-object][data-object-kind="freehand"], [data-board-object][data-object-kind="line"], [data-board-object][data-object-kind="arrow"], [data-board-object][data-object-kind="rectangle"], [data-board-object][data-object-kind="rounded_rectangle"], [data-board-object][data-object-kind="ellipse"], [data-board-object][data-object-kind="circle"], [data-board-object][data-object-kind="triangle"]'
+      )
+    )
+  },
+
+  pointerNearElement(event, element, radius = ERASER_RADIUS) {
+    const rect = element.getBoundingClientRect()
+
+    return !(
+      event.clientX < rect.left - radius ||
+      event.clientX > rect.right + radius ||
+      event.clientY < rect.top - radius ||
+      event.clientY > rect.bottom + radius
+    )
+  },
+
+  localSvgPoint(event, svg) {
+    const matrix = svg.getScreenCTM()
+
+    if (!matrix) {
+      return null
+    }
+
+    return new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse())
+  },
+
+  eraseWholeObjectAtPointer(event) {
+    const candidates = this.drawingObjectElements()
+      .filter((element) => !this.wholeEraseObjectIds.has(element.dataset.objectId))
+      .filter((element) => this.pointerNearElement(event, element))
+      .sort((left, right) => Number(right.style.zIndex || 0) - Number(left.style.zIndex || 0))
+
+    const element = candidates[0]
+
+    if (!element) {
       return
     }
 
-    this.ensureClientLayers()
+    if (element.dataset.objectKind === "freehand") {
+      const svg = element.querySelector("svg")
+      const path = element.querySelector("path[data-freehand-path]")
+      const localPoint = svg ? this.localSvgPoint(event, svg) : null
 
-    const paths = Array.from(this.drawingLayer.querySelectorAll("path[data-stroke-id]"))
-
-    for (const path of paths) {
-      if (isPointNearPath(point, path, ERASER_RADIUS / this.camera.zoom)) {
-        const strokeId = path.dataset.strokeId
-
-        this.removeStroke(strokeId)
-
-        this.pushEvent("drawing_erase", {
-          stroke_id: strokeId
-        })
+      if (!path || !localPoint || !isPointNearPath(localPoint, path, ERASER_RADIUS / this.camera.zoom)) {
+        return
       }
     }
 
-    const freehandObjects = Array.from(
-      document.querySelectorAll('[data-board-object][data-object-kind="freehand"]')
-    )
+    this.wholeEraseObjectIds.add(element.dataset.objectId)
+    element.style.opacity = "0.2"
+  },
 
-    for (const objectElement of freehandObjects) {
-      const path = objectElement.querySelector("path[data-freehand-path]")
+  erasePixelsAtPointer(event) {
+    const radius = ERASER_RADIUS / this.camera.zoom
 
-      if (!path) {
+    for (const element of this.drawingObjectElements()) {
+      if (!this.pointerNearElement(event, element)) {
         continue
       }
 
-      const objectX = parseFloat(objectElement.style.left || "0")
-      const objectY = parseFloat(objectElement.style.top || "0")
-      const localPoint = {
-        x: point.x - objectX,
-        y: point.y - objectY
+      const svg = element.querySelector("svg")
+      const mask = element.querySelector("mask[data-eraser-mask]")
+      const point = svg ? this.localSvgPoint(event, svg) : null
+
+      if (!svg || !mask || !point) {
+        continue
       }
 
-      if (isPointNearPath(localPoint, path, ERASER_RADIUS / this.camera.zoom)) {
-        this.pushEvent("delete_object", {
-          id: objectElement.dataset.objectId
-        })
-
-        return
+      if (point.x < 0 || point.x > svg.viewBox.baseVal.width || point.y < 0 || point.y > svg.viewBox.baseVal.height) {
+        continue
       }
+
+      const objectId = element.dataset.objectId
+      const marks = this.pixelEraseChanges.get(objectId) || []
+      const previous = marks[marks.length - 1]
+
+      if (previous && distanceBetween(previous, point) < Math.max(radius / 3, 2)) {
+        continue
+      }
+
+      const mark = { x: point.x, y: point.y, radius }
+      marks.push(mark)
+      this.pixelEraseChanges.set(objectId, marks)
+
+      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle")
+      circle.setAttribute("cx", point.x)
+      circle.setAttribute("cy", point.y)
+      circle.setAttribute("r", radius)
+      circle.setAttribute("fill", "black")
+      mask.appendChild(circle)
     }
   },
 
@@ -1581,6 +1753,20 @@ Hooks.BoardSurface = {
 
     document.removeEventListener("pointermove", this.onDocumentPointerMove)
     document.removeEventListener("pointerup", this.onDocumentPointerUp)
+
+    if (this.wholeEraseObjectIds.size > 0) {
+      this.pushEvent("delete_objects", {
+        ids: Array.from(this.wholeEraseObjectIds)
+      })
+    }
+
+    if (this.pixelEraseChanges.size > 0) {
+      const objects = Array.from(this.pixelEraseChanges.entries()).map(([id, marks]) => ({ id, marks }))
+      this.pushEvent("erase_object_pixels", { objects })
+    }
+
+    this.wholeEraseObjectIds = new Set()
+    this.pixelEraseChanges = new Map()
   },
 
   findStrokePath(strokeId) {
@@ -1697,8 +1883,17 @@ Hooks.BoardObjectWindow = {
         return
       }
 
-      if ((this.canvas.dataset.selectedTool || "pan") !== "cursor") {
-        this.el.style.cursor = "auto"
+      const selectedTool = this.canvas.dataset.selectedTool || "pan"
+
+      if (selectedTool !== "cursor") {
+        if (selectedTool === "draw" || selectedTool === "pixel_eraser") {
+          this.el.style.cursor = "crosshair"
+        } else if (selectedTool === "object_eraser") {
+          this.el.style.cursor = "cell"
+        } else {
+          this.el.style.cursor = "inherit"
+        }
+
         return
       }
 
